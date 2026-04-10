@@ -17,6 +17,7 @@ const displayStatus = document.getElementById('display-status');
 const statusBar = document.getElementById('status-bar');
 const inputEmail = document.getElementById('input-email');
 const inputPassword = document.getElementById('input-password');
+const btnToggleVpsUrl = document.getElementById('btn-toggle-vps-url');
 const btnFetchEmail = document.getElementById('btn-fetch-email');
 const btnTogglePassword = document.getElementById('btn-toggle-password');
 const btnSaveSettings = document.getElementById('btn-save-settings');
@@ -680,11 +681,27 @@ async function fetchDuckEmail(options = {}) {
   }
 }
 
+function syncToggleButtonLabel(button, input, labels) {
+  if (!button || !input) return;
+
+  const isHidden = input.type === 'password';
+  button.innerHTML = isHidden ? EYE_OPEN_ICON : EYE_CLOSED_ICON;
+  button.setAttribute('aria-label', isHidden ? labels.show : labels.hide);
+  button.title = isHidden ? labels.show : labels.hide;
+}
+
 function syncPasswordToggleLabel() {
-  const isHidden = inputPassword.type === 'password';
-  btnTogglePassword.innerHTML = isHidden ? EYE_OPEN_ICON : EYE_CLOSED_ICON;
-  btnTogglePassword.setAttribute('aria-label', isHidden ? '显示密码' : '隐藏密码');
-  btnTogglePassword.title = isHidden ? '显示密码' : '隐藏密码';
+  syncToggleButtonLabel(btnTogglePassword, inputPassword, {
+    show: '显示密码',
+    hide: '隐藏密码',
+  });
+}
+
+function syncVpsUrlToggleLabel() {
+  syncToggleButtonLabel(btnToggleVpsUrl, inputVpsUrl, {
+    show: '显示 CPA 地址',
+    hide: '隐藏 CPA 地址',
+  });
 }
 
 async function maybeTakeoverAutoRun(actionLabel) {
@@ -786,6 +803,11 @@ btnFetchEmail.addEventListener('click', async () => {
 btnTogglePassword.addEventListener('click', () => {
   inputPassword.type = inputPassword.type === 'password' ? 'text' : 'password';
   syncPasswordToggleLabel();
+});
+
+btnToggleVpsUrl.addEventListener('click', () => {
+  inputVpsUrl.type = inputVpsUrl.type === 'password' ? 'text' : 'password';
+  syncVpsUrlToggleLabel();
 });
 
 btnSaveSettings.addEventListener('click', async () => {
@@ -1086,6 +1108,7 @@ initTheme();
 updateSaveButtonState();
 restoreState().then(() => {
   syncPasswordToggleLabel();
+  syncVpsUrlToggleLabel();
   updateButtonStates();
   updateStatusDisplay(latestState);
 });
