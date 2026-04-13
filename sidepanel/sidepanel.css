@@ -496,10 +496,10 @@ header {
   box-shadow: 0 0 0 1px var(--blue-glow);
 }
 
-#btn-fetch-email,
-#btn-save-settings {
-  padding-inline: 10px;
+.data-inline-btn {
   flex-shrink: 0;
+  min-width: 56px;
+  justify-content: center;
 }
 
 .hotmail-card {
@@ -724,10 +724,37 @@ header {
 .auto-delay-inline {
   justify-content: space-between;
   gap: 12px;
+  flex-wrap: nowrap;
+}
+
+.auto-delay-side {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.auto-delay-side-right {
+  margin-left: auto;
+  justify-content: flex-end;
 }
 
 .auto-delay-check {
-  flex: 0 1 auto;
+  flex: 0 0 auto;
+  align-items: center;
+}
+
+.auto-delay-check span {
+  white-space: nowrap;
+}
+
+.auto-delay-caption {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .auto-delay-controls {

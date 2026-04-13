@@ -39,10 +39,9 @@ const DEFAULT_SUB2API_REDIRECT_URI = 'http://localhost:1455/auth/callback';
 const AUTO_RUN_ALARM_NAME = 'scheduled-auto-run';
 const AUTO_RUN_DELAY_MIN_MINUTES = 1;
 const AUTO_RUN_DELAY_MAX_MINUTES = 1440;
-const AUTO_STEP_RANDOM_DELAY_MIN_ALLOWED_SECONDS = 0;
-const AUTO_STEP_RANDOM_DELAY_MAX_ALLOWED_SECONDS = 600;
-const AUTO_STEP_RANDOM_DELAY_DEFAULT_MIN_SECONDS = 12;
-const AUTO_STEP_RANDOM_DELAY_DEFAULT_MAX_SECONDS = 18;
+const AUTO_STEP_DELAY_MIN_ALLOWED_SECONDS = 0;
+const AUTO_STEP_DELAY_MAX_ALLOWED_SECONDS = 600;
+const LEGACY_AUTO_STEP_DELAY_KEYS = ['autoStepRandomDelayMinSeconds', 'autoStepRandomDelayMaxSeconds'];
 const DEFAULT_LOCAL_CPA_STEP9_MODE = 'submit';
 
 initializeSessionStorageAccess();
@@ -64,8 +63,7 @@ const PERSISTED_SETTING_DEFAULTS = {
   autoRunSkipFailures: false, // 自动运行遇到失败步骤后，是否继续执行后续流程。
   autoRunDelayEnabled: false, // 自动运行是否启用启动前倒计时。
   autoRunDelayMinutes: 30, // 自动运行倒计时分钟数。
-  autoStepRandomDelayMinSeconds: AUTO_STEP_RANDOM_DELAY_DEFAULT_MIN_SECONDS, // 自动运行每一步执行前的最小随机等待秒数。
-  autoStepRandomDelayMaxSeconds: AUTO_STEP_RANDOM_DELAY_DEFAULT_MAX_SECONDS, // 自动运行每一步执行前的最大随机等待秒数。
+  autoStepDelaySeconds: null, // 自动运行每一步执行前的额外等待秒数；0 或空表示不延迟。
   mailProvider: '163', // 验证码邮箱来源（163 / 163-vip / qq / inbucket）。
   emailGenerator: 'duck', // 注册邮箱生成方式：duck / cloudflare。
   inbucketHost: '', // 仅当 mailProvider 为 inbucket 时填写 Inbucket 地址，其他情况保持为空。
@@ -125,30 +123,42 @@ function normalizeAutoRunDelayMinutes(value) {
   );
 }
 
-function normalizeAutoStepRandomDelaySeconds(value, fallback = AUTO_STEP_RANDOM_DELAY_DEFAULT_MIN_SECONDS) {
-  const numeric = Number(value);
+function normalizeAutoStepDelaySeconds(value, fallback = null) {
+  const rawValue = String(value ?? '').trim();
+  if (!rawValue) {
+    return fallback;
+  }
+
+  const numeric = Number(rawValue);
   if (!Number.isFinite(numeric)) {
     return fallback;
   }
+
   return Math.min(
-    AUTO_STEP_RANDOM_DELAY_MAX_ALLOWED_SECONDS,
-    Math.max(AUTO_STEP_RANDOM_DELAY_MIN_ALLOWED_SECONDS, Math.floor(numeric))
+    AUTO_STEP_DELAY_MAX_ALLOWED_SECONDS,
+    Math.max(AUTO_STEP_DELAY_MIN_ALLOWED_SECONDS, Math.floor(numeric))
   );
 }
 
-function normalizeAutoStepRandomDelayRange(settings = {}) {
-  const minSeconds = normalizeAutoStepRandomDelaySeconds(
-    settings.autoStepRandomDelayMinSeconds,
-    PERSISTED_SETTING_DEFAULTS.autoStepRandomDelayMinSeconds
-  );
-  const maxSeconds = Math.max(
-    minSeconds,
-    normalizeAutoStepRandomDelaySeconds(
-      settings.autoStepRandomDelayMaxSeconds,
-      PERSISTED_SETTING_DEFAULTS.autoStepRandomDelayMaxSeconds
-    )
-  );
-  return { minSeconds, maxSeconds };
+function resolveLegacyAutoStepDelaySeconds(input = {}) {
+  const hasLegacyMin = input.autoStepRandomDelayMinSeconds !== undefined;
+  const hasLegacyMax = input.autoStepRandomDelayMaxSeconds !== undefined;
+  if (!hasLegacyMin && !hasLegacyMax) {
+    return undefined;
+  }
+
+  const minSeconds = normalizeAutoStepDelaySeconds(input.autoStepRandomDelayMinSeconds, null);
+  const maxSeconds = normalizeAutoStepDelaySeconds(input.autoStepRandomDelayMaxSeconds, null);
+  if (minSeconds === null && maxSeconds === null) {
+    return null;
+  }
+  if (minSeconds === null) {
+    return maxSeconds;
+  }
+  if (maxSeconds === null) {
+    return minSeconds;
+  }
+  return Math.round((minSeconds + maxSeconds) / 2);
 }
 
 function normalizeRunCount(value) {
@@ -248,16 +258,8 @@ function normalizePersistentSettingValue(key, value) {
       return Boolean(value);
     case 'autoRunDelayMinutes':
       return normalizeAutoRunDelayMinutes(value);
-    case 'autoStepRandomDelayMinSeconds':
-      return normalizeAutoStepRandomDelaySeconds(
-        value,
-        PERSISTED_SETTING_DEFAULTS.autoStepRandomDelayMinSeconds
-      );
-    case 'autoStepRandomDelayMaxSeconds':
-      return normalizeAutoStepRandomDelaySeconds(
-        value,
-        PERSISTED_SETTING_DEFAULTS.autoStepRandomDelayMaxSeconds
-      );
+    case 'autoStepDelaySeconds':
+      return normalizeAutoStepDelaySeconds(value, PERSISTED_SETTING_DEFAULTS.autoStepDelaySeconds);
     case 'mailProvider':
       return normalizeMailProvider(value);
     case 'emailGenerator':
@@ -283,11 +285,19 @@ function buildPersistentSettingsPayload(input = {}, options = {}) {
     throw new Error('\u914d\u7f6e\u5185\u5bb9\u683c\u5f0f\u65e0\u6548\u3002');
   }
 
+  const normalizedInput = { ...input };
+  if (normalizedInput.autoStepDelaySeconds === undefined) {
+    const legacyAutoStepDelaySeconds = resolveLegacyAutoStepDelaySeconds(normalizedInput);
+    if (legacyAutoStepDelaySeconds !== undefined) {
+      normalizedInput.autoStepDelaySeconds = legacyAutoStepDelaySeconds;
+    }
+  }
+
   const payload = {};
   let matchedKeyCount = 0;
   for (const key of PERSISTED_SETTING_KEYS) {
-    if (input[key] !== undefined) {
-      payload[key] = normalizePersistentSettingValue(key, input[key]);
+    if (normalizedInput[key] !== undefined) {
+      payload[key] = normalizePersistentSettingValue(key, normalizedInput[key]);
       matchedKeyCount += 1;
     } else if (fillDefaults) {
       payload[key] = normalizePersistentSettingValue(key, PERSISTED_SETTING_DEFAULTS[key]);
@@ -306,20 +316,11 @@ function buildPersistentSettingsPayload(input = {}, options = {}) {
     payload.cloudflareDomains = domains;
   }
 
-  if (payload.autoStepRandomDelayMinSeconds !== undefined || payload.autoStepRandomDelayMaxSeconds !== undefined) {
-    const normalizedDelayRange = normalizeAutoStepRandomDelayRange({
-      autoStepRandomDelayMinSeconds: payload.autoStepRandomDelayMinSeconds,
-      autoStepRandomDelayMaxSeconds: payload.autoStepRandomDelayMaxSeconds,
-    });
-    payload.autoStepRandomDelayMinSeconds = normalizedDelayRange.minSeconds;
-    payload.autoStepRandomDelayMaxSeconds = normalizedDelayRange.maxSeconds;
-  }
-
   return payload;
 }
 
 async function getPersistedSettings() {
-  const stored = await chrome.storage.local.get(PERSISTED_SETTING_KEYS);
+  const stored = await chrome.storage.local.get([...PERSISTED_SETTING_KEYS, ...LEGACY_AUTO_STEP_DELAY_KEYS]);
   return buildPersistentSettingsPayload(stored, { fillDefaults: true });
 }
 
@@ -2473,12 +2474,6 @@ async function humanStepDelay(min = HUMAN_STEP_DELAY_MIN, max = HUMAN_STEP_DELAY
   await sleepWithStop(duration);
 }
 
-function getAutoStepRandomDelayMs(min, max) {
-  const normalizedMin = Math.max(0, Math.floor(Number(min) || 0));
-  const normalizedMax = Math.max(normalizedMin, Math.floor(Number(max) || normalizedMin));
-  return Math.floor(Math.random() * (normalizedMax - normalizedMin + 1)) + normalizedMin;
-}
-
 async function clickWithDebugger(tabId, rect) {
   throwIfStopped();
   if (!tabId) {
@@ -3085,17 +3080,13 @@ async function executeStep(step) {
 async function executeStepAndWait(step, delayAfter = 2000) {
   throwIfStopped();
 
-  const delaySettings = normalizeAutoStepRandomDelayRange(await getState());
-  const randomDelayMs = getAutoStepRandomDelayMs(
-    delaySettings.minSeconds * 1000,
-    delaySettings.maxSeconds * 1000
-  );
-  if (randomDelayMs > 0) {
+  const delaySeconds = normalizeAutoStepDelaySeconds((await getState()).autoStepDelaySeconds, null);
+  if (delaySeconds > 0) {
     await addLog(
-      `自动运行：步骤 ${step} 执行前随机等待 ${delaySettings.minSeconds}-${delaySettings.maxSeconds} 秒，本次约 ${Math.round(randomDelayMs / 1000)} 秒，避免节奏过快。`,
+      `自动运行：步骤 ${step} 执行前额外等待 ${delaySeconds} 秒，避免节奏过快。`,
       'info'
     );
-    await sleepWithStop(randomDelayMs);
+    await sleepWithStop(delaySeconds * 1000);
   }
 
   if (AUTO_RUN_BACKGROUND_COMPLETED_STEPS.has(step)) {
@@ -3446,8 +3437,7 @@ async function autoRunLoop(totalRuns, options = {}) {
         autoRunSkipFailures: prevState.autoRunSkipFailures,
         autoRunDelayEnabled: prevState.autoRunDelayEnabled,
         autoRunDelayMinutes: prevState.autoRunDelayMinutes,
-        autoStepRandomDelayMinSeconds: prevState.autoStepRandomDelayMinSeconds,
-        autoStepRandomDelayMaxSeconds: prevState.autoStepRandomDelayMaxSeconds,
+        autoStepDelaySeconds: prevState.autoStepDelaySeconds,
         mailProvider: prevState.mailProvider,
         emailGenerator: prevState.emailGenerator,
         inbucketHost: prevState.inbucketHost,

@@ -85,8 +85,7 @@ const inputRunCount = document.getElementById('input-run-count');
 const inputAutoSkipFailures = document.getElementById('input-auto-skip-failures');
 const inputAutoDelayEnabled = document.getElementById('input-auto-delay-enabled');
 const inputAutoDelayMinutes = document.getElementById('input-auto-delay-minutes');
-const inputAutoStepDelayMinSeconds = document.getElementById('input-auto-step-delay-min-seconds');
-const inputAutoStepDelayMaxSeconds = document.getElementById('input-auto-step-delay-max-seconds');
+const inputAutoStepDelaySeconds = document.getElementById('input-auto-step-delay-seconds');
 const autoStartModal = document.getElementById('auto-start-modal');
 const autoStartTitle = autoStartModal?.querySelector('.modal-title');
 const autoStartMessage = document.getElementById('auto-start-message');
@@ -112,8 +111,6 @@ const AUTO_DELAY_MAX_MINUTES = 1440;
 const AUTO_DELAY_DEFAULT_MINUTES = 30;
 const AUTO_STEP_DELAY_MIN_SECONDS = 0;
 const AUTO_STEP_DELAY_MAX_SECONDS = 600;
-const AUTO_STEP_DELAY_DEFAULT_MIN_SECONDS = 12;
-const AUTO_STEP_DELAY_DEFAULT_MAX_SECONDS = 18;
 const DEFAULT_LOCAL_CPA_STEP9_MODE = 'submit';
 
 let latestState = null;
@@ -154,7 +151,7 @@ const MAIL_PROVIDER_LOGIN_CONFIGS = {
   },
   '163-vip': {
     label: '163 VIP 邮箱',
-    url: 'https://webmail.vip.163.com/',
+    url: 'https://vip.163.com/',
   },
   qq: {
     label: 'QQ 邮箱',
@@ -453,21 +450,23 @@ function normalizeAutoDelayMinutes(value) {
   return Math.min(AUTO_DELAY_MAX_MINUTES, Math.max(AUTO_DELAY_MIN_MINUTES, Math.floor(numeric)));
 }
 
-function normalizeAutoStepDelaySeconds(value, fallback = AUTO_STEP_DELAY_DEFAULT_MIN_SECONDS) {
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) {
-    return fallback;
+function normalizeAutoStepDelaySeconds(value) {
+  const rawValue = String(value ?? '').trim();
+  if (!rawValue) {
+    return null;
   }
+
+  const numeric = Number(rawValue);
+  if (!Number.isFinite(numeric)) {
+    return null;
+  }
+
   return Math.min(AUTO_STEP_DELAY_MAX_SECONDS, Math.max(AUTO_STEP_DELAY_MIN_SECONDS, Math.floor(numeric)));
 }
 
-function normalizeAutoStepDelayRange(minValue, maxValue) {
-  const minSeconds = normalizeAutoStepDelaySeconds(minValue, AUTO_STEP_DELAY_DEFAULT_MIN_SECONDS);
-  const maxSeconds = Math.max(
-    minSeconds,
-    normalizeAutoStepDelaySeconds(maxValue, AUTO_STEP_DELAY_DEFAULT_MAX_SECONDS)
-  );
-  return { minSeconds, maxSeconds };
+function formatAutoStepDelayInputValue(value) {
+  const normalized = normalizeAutoStepDelaySeconds(value);
+  return normalized === null ? '' : String(normalized);
 }
 
 function updateAutoDelayInputState() {
@@ -621,10 +620,6 @@ function collectSettingsPayload() {
   const selectedCloudflareDomain = normalizeCloudflareDomainValue(
     !cloudflareDomainEditMode ? selectCfDomain.value : activeDomain
   ) || activeDomain;
-  const autoStepDelayRange = normalizeAutoStepDelayRange(
-    inputAutoStepDelayMinSeconds.value,
-    inputAutoStepDelayMaxSeconds.value
-  );
   return {
     panelMode: selectPanelMode.value,
     vpsUrl: inputVpsUrl.value.trim(),
@@ -644,8 +639,7 @@ function collectSettingsPayload() {
     autoRunSkipFailures: inputAutoSkipFailures.checked,
     autoRunDelayEnabled: inputAutoDelayEnabled.checked,
     autoRunDelayMinutes: normalizeAutoDelayMinutes(inputAutoDelayMinutes.value),
-    autoStepRandomDelayMinSeconds: autoStepDelayRange.minSeconds,
-    autoStepRandomDelayMaxSeconds: autoStepDelayRange.maxSeconds,
+    autoStepDelaySeconds: normalizeAutoStepDelaySeconds(inputAutoStepDelaySeconds.value),
   };
 }
 
@@ -887,12 +881,7 @@ function applySettingsState(state) {
   inputAutoSkipFailures.checked = Boolean(state?.autoRunSkipFailures);
   inputAutoDelayEnabled.checked = Boolean(state?.autoRunDelayEnabled);
   inputAutoDelayMinutes.value = String(normalizeAutoDelayMinutes(state?.autoRunDelayMinutes));
-  const autoStepDelayRange = normalizeAutoStepDelayRange(
-    state?.autoStepRandomDelayMinSeconds,
-    state?.autoStepRandomDelayMaxSeconds
-  );
-  inputAutoStepDelayMinSeconds.value = String(autoStepDelayRange.minSeconds);
-  inputAutoStepDelayMaxSeconds.value = String(autoStepDelayRange.maxSeconds);
+  inputAutoStepDelaySeconds.value = formatAutoStepDelayInputValue(state?.autoStepDelaySeconds);
   if (state?.autoRunTotalRuns) {
     inputRunCount.value = String(state.autoRunTotalRuns);
   }
@@ -948,7 +937,7 @@ function getSelectedEmailGenerator() {
 function getEmailGeneratorUiCopy() {
   if (getSelectedEmailGenerator() === 'cloudflare') {
     return {
-      buttonLabel: '生成 Cloudflare',
+      buttonLabel: '生成',
       placeholder: '点击生成 Cloudflare 邮箱，或手动粘贴邮箱',
       successVerb: '生成',
       label: 'Cloudflare 邮箱',
@@ -956,7 +945,7 @@ function getEmailGeneratorUiCopy() {
   }
 
   return {
-    buttonLabel: '获取 Duck',
+    buttonLabel: '获取',
     placeholder: '点击获取 DuckDuckGo 邮箱，或手动粘贴邮箱',
     successVerb: '获取',
     label: 'Duck 邮箱',
@@ -2416,28 +2405,14 @@ inputAutoDelayMinutes.addEventListener('blur', () => {
 });
 
 function syncAutoStepDelayInputs() {
-  const range = normalizeAutoStepDelayRange(
-    inputAutoStepDelayMinSeconds.value,
-    inputAutoStepDelayMaxSeconds.value
-  );
-  inputAutoStepDelayMinSeconds.value = String(range.minSeconds);
-  inputAutoStepDelayMaxSeconds.value = String(range.maxSeconds);
+  inputAutoStepDelaySeconds.value = formatAutoStepDelayInputValue(inputAutoStepDelaySeconds.value);
 }
 
-inputAutoStepDelayMinSeconds.addEventListener('input', () => {
+inputAutoStepDelaySeconds.addEventListener('input', () => {
   markSettingsDirty(true);
   scheduleSettingsAutoSave();
 });
-inputAutoStepDelayMinSeconds.addEventListener('blur', () => {
-  syncAutoStepDelayInputs();
-  saveSettings({ silent: true }).catch(() => { });
-});
-
-inputAutoStepDelayMaxSeconds.addEventListener('input', () => {
-  markSettingsDirty(true);
-  scheduleSettingsAutoSave();
-});
-inputAutoStepDelayMaxSeconds.addEventListener('blur', () => {
+inputAutoStepDelaySeconds.addEventListener('blur', () => {
   syncAutoStepDelayInputs();
   saveSettings({ silent: true }).catch(() => { });
 });
@@ -2539,13 +2514,8 @@ chrome.runtime.onMessage.addListener((message) => {
       if (message.payload.autoRunDelayMinutes !== undefined) {
         inputAutoDelayMinutes.value = String(normalizeAutoDelayMinutes(message.payload.autoRunDelayMinutes));
       }
-      if (message.payload.autoStepRandomDelayMinSeconds !== undefined || message.payload.autoStepRandomDelayMaxSeconds !== undefined) {
-        const autoStepDelayRange = normalizeAutoStepDelayRange(
-          message.payload.autoStepRandomDelayMinSeconds ?? inputAutoStepDelayMinSeconds.value,
-          message.payload.autoStepRandomDelayMaxSeconds ?? inputAutoStepDelayMaxSeconds.value
-        );
-        inputAutoStepDelayMinSeconds.value = String(autoStepDelayRange.minSeconds);
-        inputAutoStepDelayMaxSeconds.value = String(autoStepDelayRange.maxSeconds);
+      if (message.payload.autoStepDelaySeconds !== undefined) {
+        inputAutoStepDelaySeconds.value = formatAutoStepDelayInputValue(message.payload.autoStepDelaySeconds);
       }
       break;
     }
