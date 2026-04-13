@@ -73,6 +73,9 @@ const btnDeleteAllHotmailAccounts = document.getElementById('btn-delete-all-hotm
 const btnToggleHotmailList = document.getElementById('btn-toggle-hotmail-list');
 const hotmailListShell = document.getElementById('hotmail-list-shell');
 const hotmailAccountsList = document.getElementById('hotmail-accounts-list');
+const rowEmailPrefix = document.getElementById('row-email-prefix');
+const labelEmailPrefix = document.getElementById('label-email-prefix');
+const inputEmailPrefix = document.getElementById('input-email-prefix');
 const rowInbucketHost = document.getElementById('row-inbucket-host');
 const inputInbucketHost = document.getElementById('input-inbucket-host');
 const rowInbucketMailbox = document.getElementById('row-inbucket-mailbox');
@@ -160,6 +163,10 @@ const MAIL_PROVIDER_LOGIN_CONFIGS = {
     label: 'QQ 邮箱',
     url: 'https://wx.mail.qq.com/',
   },
+  '2925': {
+    label: '2925 邮箱',
+    url: 'https://2925.com/#/mailList',
+  },
 };
 
 // ============================================================
@@ -181,6 +188,10 @@ const LOG_LEVEL_LABELS = {
   warn: '警告',
   error: '错误',
 };
+
+function usesGeneratedAliasMailProvider(provider) {
+  return provider === '2925';
+}
 
 function showToast(message, type = 'error', duration = 4000) {
   const toast = document.createElement('div');
@@ -637,6 +648,7 @@ function collectSettingsPayload() {
     customPassword: inputPassword.value,
     mailProvider: selectMailProvider.value,
     emailGenerator: selectEmailGenerator.value,
+    emailPrefix: inputEmailPrefix.value.trim(),
     inbucketHost: inputInbucketHost.value.trim(),
     inbucketMailbox: inputInbucketMailbox.value.trim(),
     cloudflareDomain: selectedCloudflareDomain,
@@ -784,7 +796,7 @@ function applyAutoRunStatus(payload = currentAutoRun) {
 
   inputRunCount.disabled = currentAutoRun.autoRunning;
   btnAutoRun.disabled = currentAutoRun.autoRunning;
-  btnFetchEmail.disabled = locked;
+  btnFetchEmail.disabled = locked || usesGeneratedAliasMailProvider(selectMailProvider.value);
   inputEmail.disabled = locked;
   inputAutoSkipFailures.disabled = scheduled;
 
@@ -818,7 +830,7 @@ function applyAutoRunStatus(payload = currentAutoRun) {
       setDefaultAutoRunButton();
       inputEmail.disabled = false;
       if (!locked) {
-        btnFetchEmail.disabled = false;
+        btnFetchEmail.disabled = usesGeneratedAliasMailProvider(selectMailProvider.value);
       }
       break;
   }
@@ -880,6 +892,7 @@ function applySettingsState(state) {
   inputSub2ApiGroup.value = state?.sub2apiGroupName || '';
   selectMailProvider.value = state?.mailProvider || '163';
   selectEmailGenerator.value = state?.emailGenerator || 'duck';
+  inputEmailPrefix.value = state?.emailPrefix || '';
   inputInbucketHost.value = state?.inbucketHost || '';
   inputInbucketMailbox.value = state?.inbucketMailbox || '';
   renderCloudflareDomainOptions(state?.cloudflareDomain || '');
@@ -989,6 +1002,22 @@ function isCurrentEmailManagedByHotmail(state = latestState) {
   const inputEmailValue = String(inputEmail.value || '').trim();
   const stateEmailValue = String(state?.email || '').trim();
   return inputEmailValue === hotmailEmail || stateEmailValue === hotmailEmail;
+}
+
+function isCurrentEmailManagedByGeneratedAlias(provider = latestState?.mailProvider, state = latestState) {
+  const normalizedProvider = String(provider || '').trim();
+  if (!usesGeneratedAliasMailProvider(normalizedProvider)) {
+    return false;
+  }
+
+  const inputEmailValue = String(inputEmail.value || '').trim().toLowerCase();
+  const stateEmailValue = String(state?.email || '').trim().toLowerCase();
+
+  if (normalizedProvider === '2925') {
+    return inputEmailValue.endsWith('@2925.com') || stateEmailValue.endsWith('@2925.com');
+  }
+
+  return false;
 }
 
 function updateMailLoginButtonState() {
@@ -1206,10 +1235,13 @@ function renderHotmailAccounts() {
 }
 
 function updateMailProviderUI() {
+  const use2925 = selectMailProvider.value === '2925';
+  const useGeneratedAlias = usesGeneratedAliasMailProvider(selectMailProvider.value);
   const useInbucket = selectMailProvider.value === 'inbucket';
   const useHotmail = selectMailProvider.value === 'hotmail-api';
-  const useEmailGenerator = !useHotmail;
+  const useEmailGenerator = !useHotmail && !useGeneratedAlias;
   updateMailLoginButtonState();
+  rowEmailPrefix.style.display = useGeneratedAlias ? '' : 'none';
   rowInbucketHost.style.display = useInbucket ? '' : 'none';
   rowInbucketMailbox.style.display = useInbucket ? '' : 'none';
   const useCloudflare = selectEmailGenerator.value === 'cloudflare';
@@ -1228,18 +1260,23 @@ function updateMailProviderUI() {
   if (hotmailSection) {
     hotmailSection.style.display = useHotmail ? '' : 'none';
   }
-  selectEmailGenerator.disabled = useHotmail;
+  labelEmailPrefix.textContent = '邮箱前缀';
+  inputEmailPrefix.placeholder = '例如 abc';
+  selectEmailGenerator.disabled = useHotmail || useGeneratedAlias;
   btnFetchEmail.hidden = useHotmail;
-  inputEmail.readOnly = useHotmail;
+  inputEmail.readOnly = useHotmail || useGeneratedAlias;
   const uiCopy = getEmailGeneratorUiCopy();
-  inputEmail.placeholder = useHotmail ? '由 Hotmail 账号池自动分配' : uiCopy.placeholder;
+  inputEmail.placeholder = useHotmail
+    ? '由 Hotmail 账号池自动分配'
+    : (use2925 ? '步骤 3 自动生成 2925 邮箱并回填' : uiCopy.placeholder);
+  btnFetchEmail.disabled = useGeneratedAlias || isAutoRunLockedPhase();
   if (!btnFetchEmail.disabled) {
     btnFetchEmail.textContent = uiCopy.buttonLabel;
   }
   if (autoHintText) {
     autoHintText.textContent = useHotmail
       ? '请先校验并选择一个 Hotmail 账号'
-      : '先自动获取邮箱，或手动粘贴邮箱后再继续';
+      : (useGeneratedAlias ? '步骤 3 会自动生成邮箱，无需手动获取' : '先自动获取邮箱，或手动粘贴邮箱后再继续');
   }
   if (useHotmail) {
     inputEmail.value = getCurrentHotmailEmail();
@@ -1769,6 +1806,16 @@ document.querySelectorAll('.step-btn').forEach(btn => {
           if (response?.error) {
             throw new Error(response.error);
           }
+        } else if (usesGeneratedAliasMailProvider(selectMailProvider.value)) {
+          const emailPrefix = inputEmailPrefix.value.trim();
+          if (!emailPrefix) {
+            showToast('请先填写 2925 邮箱前缀。', 'warn');
+            return;
+          }
+          const response = await chrome.runtime.sendMessage({ type: 'EXECUTE_STEP', source: 'sidepanel', payload: { step, emailPrefix } });
+          if (response?.error) {
+            throw new Error(response.error);
+          }
         } else {
           let email = inputEmail.value.trim();
           if (!email) {
@@ -2291,7 +2338,13 @@ selectMailProvider.addEventListener('change', async () => {
   const previousProvider = latestState?.mailProvider || '';
   const nextProvider = selectMailProvider.value;
   updateMailProviderUI();
-  if (previousProvider === 'hotmail-api' && nextProvider !== 'hotmail-api' && isCurrentEmailManagedByHotmail()) {
+  const leavingHotmail = previousProvider === 'hotmail-api'
+    && nextProvider !== 'hotmail-api'
+    && isCurrentEmailManagedByHotmail();
+  const leavingGeneratedAlias = previousProvider !== nextProvider
+    && usesGeneratedAliasMailProvider(previousProvider)
+    && isCurrentEmailManagedByGeneratedAlias(previousProvider);
+  if (leavingHotmail || leavingGeneratedAlias) {
     await clearRegistrationEmail({ silent: true }).catch(() => { });
   }
   markSettingsDirty(true);
@@ -2377,6 +2430,14 @@ inputSub2ApiGroup.addEventListener('input', () => {
 });
 inputSub2ApiGroup.addEventListener('blur', () => {
   saveSettings({ silent: true }).catch(() => { });
+});
+
+inputEmailPrefix.addEventListener('input', () => {
+  markSettingsDirty(true);
+  scheduleSettingsAutoSave();
+});
+inputEmailPrefix.addEventListener('blur', () => {
+  saveSettings({ silent: true }).catch(() => {});
 });
 
 inputInbucketMailbox.addEventListener('input', () => {
