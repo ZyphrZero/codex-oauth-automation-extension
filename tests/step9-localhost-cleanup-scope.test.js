@@ -96,6 +96,10 @@ async function setEmailState(email) {
   currentState = { ...currentState, email };
 }
 
+function shouldUseCustomRegistrationEmail() {
+  return false;
+}
+
 function broadcastDataUpdate() {}
 
 async function addLog(message) {
@@ -163,8 +167,8 @@ return {
   let snapshot = api.snapshot();
   assert.deepStrictEqual(
     snapshot.removedBatches,
-    [[1], [2]],
-    'handleStepData(9) 应先关闭当前 callback 页，再按同源首段路径清理残留页'
+    [[1], [2, 3]],
+    'handleStepData(9) 应先关闭当前 callback 页，再按同源首段路径清理 /codex 前缀残留页'
   );
   assert.strictEqual(
     snapshot.currentState.tabRegistry['signup-page'],

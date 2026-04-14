@@ -172,6 +172,8 @@ async function broadcastAutoRunStatus(phase, payload = {}) {
 }
 
 async function sleepWithStop() {}
+async function waitBetweenAutoRunRounds() {}
+async function logAutoRunFinalSummary() {}
 async function waitForRunningStepsToFinish() {
   return getState();
 }
@@ -179,6 +181,20 @@ async function broadcastStopToContentScripts() {}
 function cancelPendingCommands() {}
 function normalizeAutoRunFallbackThreadIntervalMinutes(value) {
   return Math.max(0, Math.floor(Number(value) || 0));
+}
+
+function buildAutoRunRoundSummaries(totalRuns, rawSummaries = []) {
+  return Array.from({ length: totalRuns }, (_, index) => (
+    rawSummaries[index] || {
+      run: index + 1,
+      status: 'pending',
+      attemptRuns: 0,
+    }
+  ));
+}
+
+function serializeAutoRunRoundSummaries(totalRuns, roundSummaries = []) {
+  return buildAutoRunRoundSummaries(totalRuns, roundSummaries);
 }
 
 const chrome = {

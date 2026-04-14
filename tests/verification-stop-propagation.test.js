@@ -60,16 +60,12 @@ async function testPollFreshVerificationCodeRethrowsStop() {
   const api = new Function(`
 let stopRequested = false;
 const STOP_ERROR_MESSAGE = '流程已被用户停止。';
-const HOTMAIL_PROVIDER = 'hotmail-api';
+const MOEMAIL_PROVIDER = 'moemail';
 const VERIFICATION_POLL_MAX_ROUNDS = 5;
 const logs = [];
 let resendCalls = 0;
-
-function getHotmailVerificationPollConfig() {
-  return {};
-}
-async function pollHotmailVerificationCode() {
-  throw new Error('hotmail path should not run in this test');
+async function pollMoemailVerificationCode() {
+  throw new Error('moemail path should not run in this test');
 }
 function getVerificationCodeStateKey(step) {
   return step === 4 ? 'lastSignupCode' : 'lastLoginCode';
@@ -121,15 +117,11 @@ async function testResolveVerificationStepRethrowsStopFromFreshRequest() {
 
   const api = new Function(`
 const STOP_ERROR_MESSAGE = '流程已被用户停止。';
-const HOTMAIL_PROVIDER = 'hotmail-api';
 const logs = [];
 let pollCalls = 0;
 
 function getVerificationCodeStateKey(step) {
   return step === 4 ? 'lastSignupCode' : 'lastLoginCode';
-}
-function getHotmailVerificationPollConfig() {
-  return {};
 }
 function getVerificationCodeLabel(step) {
   return step === 4 ? '注册' : '登录';

@@ -2,7 +2,7 @@
 
 一个用于批量跑通 ChatGPT OAuth 注册/登录流程的 Chrome 扩展。
 
-当前版本基于侧边栏控制，支持单步执行、整套自动执行、停止当前流程、保存常用配置，以及通过 DuckDuckGo / QQ / 163 / Inbucket / Hotmail 协助获取验证码。
+当前版本基于侧边栏控制，支持单步执行、整套自动执行、停止当前流程、保存常用配置，以及通过 DuckDuckGo / QQ / 163 / Inbucket / MoeMail 协助获取验证码。
 
 ## 插件效果
 
@@ -52,7 +52,7 @@
 - 支持自定义密码；留空时自动生成强密码
 - 自动显示当前使用中的密码，便于后续保存
 - 自动获取注册验证码与登录验证码
-- 支持 `Hotmail`：继续使用 `邮箱 + 客户端 ID + 刷新令牌（refresh token）`，并可在远程服务与本地助手两种模式间切换
+- 支持 `MoeMail`：通过 API 直接创建邮箱并轮询验证码
 - 支持 `QQ Mail`、`163 Mail`、`Inbucket mailbox`
 - 支持从 DuckDuckGo Email Protection 自动生成新的 `@duck.com` 地址
 - 支持基于 Cloudflare 自定义域名自动生成随机邮箱前缀
@@ -105,13 +105,14 @@
 4. Step 1 会直接在 SUB2API 后台生成 OAuth 链接
 5. Step 9 会把 localhost 回调提交回 SUB2API，并直接创建 OpenAI 账号
 
-### 方案 C：`Hotmail 账号池`
+### 方案 C：`MoeMail API`
 
-1. `Mail` 选择 `Hotmail`
-2. 在 `Hotmail 账号池` 中添加 `邮箱 / Client ID / Refresh Token`
-3. 先点 `校验`，再点 `测试收信`
-4. 通过后再执行步骤或 `Auto`
-5. 当前项目中，`Mail = Hotmail` 时会直接使用账号池里的邮箱作为注册邮箱，不再走 `Duck / Cloudflare` 自动生成
+1. `Mail` 选择 `MoeMail`
+2. 填写 `MoeMail API Base URL` 与 `MoeMail API Key`
+3. 可选填写固定域名；留空时会自动读取服务端配置并选第一个可用域名
+4. 可选填写邮箱前缀；留空时会随机生成
+5. 点击 `生成` 直接创建注册邮箱
+6. Step 4 / Step 7 会通过 MoeMail API 自动轮询验证码
 
 ## 侧边栏配置说明
 
@@ -129,7 +130,7 @@ Step 1 和 Step 9 都依赖这个地址。
 
 支持五种验证码来源：
 
-- `Hotmail`
+- `MoeMail`
 - `163 Mail`
 - `163 VIP Mail`
 - `QQ Mail`
@@ -137,83 +138,28 @@ Step 1 和 Step 9 都依赖这个地址。
 
 说明：
 
-- `Hotmail` 通过侧边栏里的 Hotmail 账号池选择账号，可切换为远程服务模式或本地助手模式
+- `MoeMail` 通过 API 直接生成邮箱并轮询验证码，不依赖网页邮箱标签页
 - `QQ`、`163`、`163 VIP` 用于直接轮询网页邮箱
 - `Inbucket` 通过你在侧边栏里配置的 host 访问 `mailbox` 页面：`https://<your-inbucket-host>/m/<mailbox>/`
 
-### `Hotmail 账号池`
+### `MoeMail`
 
-仅当 `Mail = Hotmail` 时使用。
+仅当 `Mail = MoeMail` 时使用。
 
 可配置项：
 
-- `接码模式`
-- `远程服务地址`
-- `本地助手地址`
+- `MoeMail API Base URL`
+- `MoeMail API Key`
+- 可选固定域名
+- 可选邮箱前缀
 
-每条账号支持保存：
+说明：
 
-- `email`
-- `clientId`
-- `refreshToken`
-- 可选邮箱密码备注
-
-使用方式：
-
-- 先选择 Hotmail 接码模式
-- 远程模式下填写你自己的远程服务地址
-- 本地模式下填写本地助手地址（默认 `http://127.0.0.1:17373`）
-- Windows 运行仓库根目录的 `start-hotmail-helper.bat`
-- macOS 运行仓库根目录的 `start-hotmail-helper.command`
-- 本地 helper 当前仅依赖 Python 标准库，无需额外安装第三方 Python 包
-- 再新增账号
-- 点击 `校验`
-- 校验通过后，可点击 `测试收信`
-- Auto 模式每轮会自动选用一个可用账号
-
-#### 本地 helper 启动命令
-
-Windows：
-
-```powershell
-.\start-hotmail-helper.bat
-```
-
-macOS：
-
-```bash
-chmod +x ./start-hotmail-helper.command
-./start-hotmail-helper.command
-```
-
-如果你不想走启动脚本，也可以直接运行 Python 程序本体：
-
-```bash
-python scripts/hotmail_helper.py
-```
-
-如果你的环境里命令是 `python3`：
-
-```bash
-python3 scripts/hotmail_helper.py
-```
-
-#### 启动成功标志
-
-本地 helper 启动成功后，终端会输出：
-
-```text
-Hotmail helper listening on http://127.0.0.1:17373
-```
-
-看到这行再回到扩展里点 `校验` 或 `复制最新验证码`。
-
-#### 最小排错说明
-
-- 如果提示 `Python 3 not found`，先安装 Python 3.10+
-- 如果 helper 已启动但扩展仍报连接失败，先确认模式切到了 `本地助手`
-- 确认本地助手地址与终端输出一致，默认应为 `http://127.0.0.1:17373`
-- 如果地址一致仍失败，再检查是否有端口占用或终端里是否已经抛出异常
+- 默认 API 地址是 `https://sall.cc`
+- API 地址必须包含协议头，例如 `https://example.com`
+- 域名留空时，扩展会调用 `/api/config` 读取 MoeMail 可用域名并自动选第一个
+- 点击 `生成` 时会调用 `/api/emails/generate` 创建邮箱，并自动回填到“注册邮箱”
+- Step 4 / Step 7 会通过 `/api/emails/:id` 与 `/api/emails/:id/:messageId` 拉取邮件并提取验证码
 
 ### `Mailbox`
 
@@ -262,8 +208,7 @@ Step 3 使用的注册邮箱。
 - 若 `邮箱生成 = Cloudflare`，插件里只需要维护 `CF 域名`
 - `CF 域名` 支持保存多个，并通过下拉框切换当前要生成的域名
 - Cloudflare 侧的转发规则、Catch-all、路由目标邮箱等，都需要你自己提前在 Cloudflare 后台配置好
-- 当 `Mail = Hotmail` 时，这个输入框由账号池自动同步当前账号邮箱
-- 当 `Mail = Hotmail` 时，Step 3 会直接使用 Hotmail 账号池里的邮箱；`Duck / Cloudflare` 不参与自动邮箱生成
+- 当 `Mail = MoeMail` 时，可以手动粘贴已有 MoeMail 地址，或直接点 `生成` 由扩展自动创建
 - 若你准备走 `Cloudflare`，更推荐把 `Mail` 设为 `QQ / 163 / 163 VIP`；`Inbucket` 仅在它能真实接收外部邮件并完成 Cloudflare 验证时再使用
 - 当前 `Auto` 按钮只负责 DuckDuckGo 地址获取
 - 如果你使用 Inbucket，它只是验证码收件箱，不会自动生成 Inbucket 地址
@@ -306,7 +251,7 @@ Cloudflare 模式下，插件不会再调用 Cloudflare API 创建路由。
 - `Mail = 163 Mail`：Cloudflare 的 `Destination address / Destination addresses` 填你的 163 邮箱全地址
 - `Mail = 163 VIP Mail`：Cloudflare 的 `Destination address / Destination addresses` 填你的 163 VIP 邮箱全地址
 - `Mail = Inbucket`：仅当你的 Inbucket 实例本身就是一个真实可收外部邮件、且能收到 Cloudflare 验证邮件的地址时再使用
-- `Mail = Hotmail`：当前项目的自动流程不推荐和 Cloudflare 同时使用；因为 `Mail = Hotmail` 时，注册邮箱会直接使用 Hotmail 账号池邮箱
+- `Mail = MoeMail`：注册邮箱直接由 MoeMail 创建，`Duck / Cloudflare` 配置不会参与当前轮邮箱生成
 
 #### Cloudflare 后台怎么配（按钮中英对照）
 
@@ -414,8 +359,7 @@ Cloudflare 模式下，插件不会再调用 Cloudflare API 创建路由。
 1. Step 1 获取 CPA OAuth 链接
 2. Step 2 打开 OpenAI 注册页
 3. 根据 `Mail` 选择邮箱来源
-4. 如果 `Mail = Hotmail`，会从账号池自动分配一个可用账号
-5. 如果不是 Hotmail，则按当前“邮箱生成”配置尝试自动获取邮箱（Duck 或 Cloudflare）
+4. 如果 `Mail = MoeMail`，会直接通过 API 自动创建一个新邮箱`r`n5. 其他模式则按当前“邮箱生成”配置尝试自动获取邮箱（Duck 或 Cloudflare）
 6. 如果自动获取失败，暂停并等待你在侧边栏填写邮箱后点击 `Continue`
 7. 继续执行 Step 3 ~ Step 9
 
@@ -467,7 +411,7 @@ Cloudflare 模式下，插件不会再调用 Cloudflare API 创建路由。
 
 支持：
 
-- `Hotmail`（远程服务 / 本地助手）
+- `MoeMail`（API 直连）
 - `content/qq-mail.js`
 - `content/mail-163.js`
 - `content/inbucket-mail.js`
@@ -593,7 +537,6 @@ Cloudflare 模式下，插件不会再调用 Cloudflare API 创建路由。
 - 邮箱服务
 - Inbucket 主机
 - Inbucket 邮箱名
-- Hotmail 账号池与对应令牌
 - 兜底开关
 
 特点：
@@ -613,7 +556,7 @@ data/names.js              随机姓名、生日数据
 content/utils.js           通用工具：等待元素、点击、日志、停止控制
 content/vps-panel.js       CPA 面板步骤：Step 1 / Step 9
 content/signup-page.js     OpenAI 注册/登录页步骤：Step 2 / 3 / 5 / 6 / 8
-hotmail-utils.js           Hotmail 收信相关通用辅助
+content/moemail-utils.js   MoeMail API 与消息归一化辅助
 content/duck-mail.js       Duck 邮箱自动获取
 content/qq-mail.js         QQ 邮箱验证码轮询
 content/mail-163.js        163 邮箱验证码轮询
@@ -689,3 +632,6 @@ sidepanel/                 侧边栏 UI
 - 没有硬编码你的 CPA 地址、密码或账户
 - 自定义密码只存在当前会话存储中
 - 邮箱和密码会被记录到本轮 `accounts` 中，便于追踪本次运行结果
+
+
+

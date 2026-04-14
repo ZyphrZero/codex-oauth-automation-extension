@@ -1,30 +1,27 @@
 // background.js — Service Worker: orchestration, state, tab management, message routing
 
-importScripts('data/names.js', 'hotmail-utils.js', 'content/activation-utils.js');
+importScripts('data/names.js', 'content/moemail-utils.js', 'content/activation-utils.js');
 
 const {
-  buildHotmailMailApiLatestUrl,
-  extractVerificationCodeFromMessage,
-  filterHotmailAccountsByUsage,
-  getLatestHotmailMessage,
-  getHotmailMailApiRequestConfig,
-  getHotmailVerificationPollConfig,
-  getHotmailVerificationRequestTimestamp,
-  normalizeHotmailMailApiMessages,
-  pickHotmailAccountForRun,
   pickVerificationMessage,
-  pickVerificationMessageWithFallback,
   pickVerificationMessageWithTimeFallback,
-  shouldClearHotmailCurrentSelection,
-} = self.HotmailUtils;
+  DEFAULT_MOEMAIL_API_BASE_URL,
+  buildMoemailApiUrl,
+  normalizeTimestamp,
+  normalizeMoemailApiBaseUrl: normalizeMoemailApiBaseUrlValue,
+  normalizeMoemailDomain: normalizeMoemailDomainValue,
+  normalizeMoemailMessages,
+  parseMoemailConfigDomains,
+} = self.MoemailUtils;
 const {
   isRecoverableStep9AuthFailure,
 } = self.MultiPageActivationUtils;
 
 const LOG_PREFIX = '[MultiPage:bg]';
 const DUCK_AUTOFILL_URL = 'https://duckduckgo.com/email/settings/autofill';
-const HOTMAIL_PROVIDER = 'hotmail-api';
-const HOTMAIL_MAILBOXES = ['INBOX', 'Junk'];
+const MOEMAIL_PROVIDER = 'moemail';
+const MOEMAIL_REQUEST_TIMEOUT_MS = 15000;
+const MOEMAIL_MAX_MESSAGE_DETAILS = 12;
 const STOP_ERROR_MESSAGE = '流程已被用户停止。';
 const HUMAN_STEP_DELAY_MIN = 700;
 const HUMAN_STEP_DELAY_MAX = 2200;
@@ -43,11 +40,6 @@ const AUTO_STEP_DELAY_MIN_ALLOWED_SECONDS = 0;
 const AUTO_STEP_DELAY_MAX_ALLOWED_SECONDS = 600;
 const LEGACY_AUTO_STEP_DELAY_KEYS = ['autoStepRandomDelayMinSeconds', 'autoStepRandomDelayMaxSeconds'];
 const DEFAULT_LOCAL_CPA_STEP9_MODE = 'submit';
-const HOTMAIL_SERVICE_MODE_REMOTE = 'remote';
-const HOTMAIL_SERVICE_MODE_LOCAL = 'local';
-const DEFAULT_HOTMAIL_REMOTE_BASE_URL = '';
-const DEFAULT_HOTMAIL_LOCAL_BASE_URL = 'http://127.0.0.1:17373';
-const HOTMAIL_LOCAL_HELPER_TIMEOUT_MS = 45000;
 
 initializeSessionStorageAccess();
 
@@ -75,12 +67,11 @@ const PERSISTED_SETTING_DEFAULTS = {
   emailPrefix: '',
   inbucketHost: '',
   inbucketMailbox: '',
-  hotmailServiceMode: HOTMAIL_SERVICE_MODE_LOCAL,
-  hotmailRemoteBaseUrl: DEFAULT_HOTMAIL_REMOTE_BASE_URL,
-  hotmailLocalBaseUrl: DEFAULT_HOTMAIL_LOCAL_BASE_URL,
+  moemailApiBaseUrl: DEFAULT_MOEMAIL_API_BASE_URL,
+  moemailApiKey: '',
+  moemailDomain: '',
   cloudflareDomain: '',
   cloudflareDomains: [],
-  hotmailAccounts: [],
 };
 
 const PERSISTED_SETTING_KEYS = Object.keys(PERSISTED_SETTING_DEFAULTS);
@@ -123,7 +114,7 @@ const DEFAULT_STATE = {
   autoRunCountdownNote: '',
   signupVerificationRequestedAt: null,
   loginVerificationRequestedAt: null,
-  currentHotmailAccountId: null,
+  moemailEmailId: null,
 };
 
 function normalizeAutoRunDelayMinutes(value) {
@@ -231,7 +222,7 @@ function normalizeMailProvider(value = '') {
   const normalized = String(value || '').trim().toLowerCase();
   switch (normalized) {
     case 'custom':
-    case HOTMAIL_PROVIDER:
+    case MOEMAIL_PROVIDER:
     case '163':
     case '163-vip':
     case 'qq':
@@ -273,59 +264,27 @@ function normalizeCloudflareDomains(values) {
   return normalizedDomains;
 }
 
-function normalizeHotmailServiceMode(rawValue = '') {
-  return HOTMAIL_SERVICE_MODE_LOCAL;
-}
-
-function normalizeHotmailRemoteBaseUrl(rawValue = '') {
-  const value = String(rawValue || '').trim();
-  if (!value) return DEFAULT_HOTMAIL_REMOTE_BASE_URL;
-
+function normalizeMoemailApiBaseUrl(rawValue = '') {
   try {
-    const parsed = new URL(value);
-    if (!['http:', 'https:'].includes(parsed.protocol)) {
-      return DEFAULT_HOTMAIL_REMOTE_BASE_URL;
-    }
-
-    if (parsed.pathname.endsWith('/api/mail-new') || parsed.pathname.endsWith('/api/mail-all') || parsed.pathname === '/api.html') {
-      parsed.pathname = '';
-      parsed.search = '';
-      parsed.hash = '';
-    }
-
-    return parsed.toString().replace(/\/$/, '');
+    return normalizeMoemailApiBaseUrlValue(rawValue);
   } catch {
-    return DEFAULT_HOTMAIL_REMOTE_BASE_URL;
+    return DEFAULT_MOEMAIL_API_BASE_URL;
   }
 }
 
-function normalizeHotmailLocalBaseUrl(rawValue = '') {
-  const value = String(rawValue || '').trim();
-  if (!value) return DEFAULT_HOTMAIL_LOCAL_BASE_URL;
-
-  try {
-    const parsed = new URL(value);
-    if (!['http:', 'https:'].includes(parsed.protocol)) {
-      return DEFAULT_HOTMAIL_LOCAL_BASE_URL;
-    }
-
-    if (['/messages', '/code', '/clear', '/token'].includes(parsed.pathname)) {
-      parsed.pathname = '';
-      parsed.search = '';
-      parsed.hash = '';
-    }
-
-    return parsed.toString().replace(/\/$/, '');
-  } catch {
-    return DEFAULT_HOTMAIL_LOCAL_BASE_URL;
-  }
+function normalizeMoemailApiKey(rawValue = '') {
+  return String(rawValue || '').trim();
 }
 
-function getHotmailServiceSettings(state = {}) {
+function normalizeMoemailDomain(rawValue = '') {
+  return normalizeMoemailDomainValue(rawValue);
+}
+
+function getMoemailSettings(state = {}) {
   return {
-    mode: normalizeHotmailServiceMode(state.hotmailServiceMode),
-    remoteBaseUrl: normalizeHotmailRemoteBaseUrl(state.hotmailRemoteBaseUrl),
-    localBaseUrl: normalizeHotmailLocalBaseUrl(state.hotmailLocalBaseUrl),
+    baseUrl: normalizeMoemailApiBaseUrl(state.moemailApiBaseUrl),
+    apiKey: normalizeMoemailApiKey(state.moemailApiKey),
+    domain: normalizeMoemailDomain(state.moemailDomain),
   };
 }
 
@@ -368,18 +327,16 @@ function normalizePersistentSettingValue(key, value) {
       return String(value || '').trim();
     case 'inbucketMailbox':
       return String(value || '').trim();
-    case 'hotmailServiceMode':
-      return normalizeHotmailServiceMode(value);
-    case 'hotmailRemoteBaseUrl':
-      return normalizeHotmailRemoteBaseUrl(value);
-    case 'hotmailLocalBaseUrl':
-      return normalizeHotmailLocalBaseUrl(value);
+    case 'moemailApiBaseUrl':
+      return normalizeMoemailApiBaseUrl(value);
+    case 'moemailApiKey':
+      return normalizeMoemailApiKey(value);
+    case 'moemailDomain':
+      return normalizeMoemailDomain(value);
     case 'cloudflareDomain':
       return normalizeCloudflareDomain(value);
     case 'cloudflareDomains':
       return normalizeCloudflareDomains(value);
-    case 'hotmailAccounts':
-      return normalizeHotmailAccounts(value);
     default:
       return value;
   }
@@ -512,14 +469,14 @@ async function importSettingsBundle(configBundle) {
 
   const sessionUpdates = {
     ...importedSettings,
-    currentHotmailAccountId: null,
+    moemailEmailId: null,
     email: null,
   };
 
   await setState(sessionUpdates);
   broadcastDataUpdate({
     ...importedSettings,
-    currentHotmailAccountId: null,
+    moemailEmailId: null,
     ...(sessionUpdates.email !== undefined ? { email: sessionUpdates.email } : {}),
   });
 
@@ -533,9 +490,20 @@ function broadcastDataUpdate(payload) {
   }).catch(() => { });
 }
 
-async function setEmailStateSilently(email) {
-  await setState({ email });
-  broadcastDataUpdate({ email });
+async function setEmailStateSilently(email, options = {}) {
+  const normalizedEmail = String(email || '').trim() || null;
+  const currentState = await getState();
+  const currentEmail = String(currentState.email || '').trim() || null;
+  const updates = { email: normalizedEmail };
+
+  if (options.moemailEmailId !== undefined) {
+    updates.moemailEmailId = String(options.moemailEmailId || '').trim() || null;
+  } else if (!normalizedEmail || normalizedEmail !== currentEmail) {
+    updates.moemailEmailId = null;
+  }
+
+  await setState(updates);
+  broadcastDataUpdate(updates);
 }
 
 async function setEmailState(email) {
@@ -601,48 +569,11 @@ function generatePassword() {
   return pw.split('').sort(() => Math.random() - 0.5).join('');
 }
 
-function normalizeHotmailAccount(account = {}) {
-  const normalizedLastAuthAt = Number.isFinite(Number(account.lastAuthAt)) ? Number(account.lastAuthAt) : 0;
-  const normalizedStatus = String(
-    account.status
-    || (normalizedLastAuthAt > 0 ? 'authorized' : 'pending')
-  );
-  return {
-    id: String(account.id || crypto.randomUUID()),
-    email: String(account.email || '').trim(),
-    password: String(account.password || ''),
-    clientId: String(account.clientId || '').trim(),
-    refreshToken: String(account.refreshToken || ''),
-    status: normalizedStatus,
-    enabled: account.enabled !== undefined ? Boolean(account.enabled) : true,
-    used: Boolean(account.used),
-    lastUsedAt: Number.isFinite(Number(account.lastUsedAt)) ? Number(account.lastUsedAt) : 0,
-    lastAuthAt: normalizedLastAuthAt,
-    lastError: String(account.lastError || ''),
-  };
-}
-
-function normalizeHotmailAccounts(accounts) {
-  if (!Array.isArray(accounts)) return [];
-
-  const deduped = new Map();
-  for (const account of accounts) {
-    const normalized = normalizeHotmailAccount(account);
-    if (!normalized.email && !normalized.id) continue;
-    deduped.set(normalized.id, normalized);
-  }
-  return [...deduped.values()];
-}
-
-function findHotmailAccount(accounts, accountId) {
-  return normalizeHotmailAccounts(accounts).find((account) => account.id === accountId) || null;
-}
-
-function isHotmailProvider(stateOrProvider) {
+function isMoemailProvider(stateOrProvider) {
   const provider = typeof stateOrProvider === 'string'
     ? stateOrProvider
     : stateOrProvider?.mailProvider;
-  return provider === HOTMAIL_PROVIDER;
+  return provider === MOEMAIL_PROVIDER;
 }
 
 function isCustomMailProvider(stateOrProvider) {
@@ -652,205 +583,67 @@ function isCustomMailProvider(stateOrProvider) {
   return provider === 'custom';
 }
 
-async function syncHotmailAccounts(accounts) {
-  const normalized = normalizeHotmailAccounts(accounts);
-  await setPersistentSettings({ hotmailAccounts: normalized });
-  await setState({ hotmailAccounts: normalized });
-  broadcastDataUpdate({ hotmailAccounts: normalized });
-  return normalized;
-}
+function getVerificationRequestTimestamp(step, state = {}, options = {}) {
+  const bufferMs = Number(options.bufferMs) || 15_000;
+  const signupRequestedAt = normalizeTimestamp(state.signupVerificationRequestedAt);
+  const loginRequestedAt = normalizeTimestamp(state.loginVerificationRequestedAt);
+  const lastEmailTimestamp = normalizeTimestamp(state.lastEmailTimestamp);
+  const flowStartTime = normalizeTimestamp(state.flowStartTime);
 
-async function upsertHotmailAccount(input) {
-  const state = await getState();
-  const accounts = normalizeHotmailAccounts(state.hotmailAccounts);
-  const normalizedEmail = String(input?.email || '').trim().toLowerCase();
-  const existing = input?.id
-    ? findHotmailAccount(accounts, input.id)
-    : accounts.find((account) => account.email.toLowerCase() === normalizedEmail) || null;
-  const credentialsChanged = !existing
-    || (input?.clientId !== undefined && String(input.clientId).trim() !== existing.clientId)
-    || (input?.refreshToken !== undefined && String(input.refreshToken).trim() !== existing.refreshToken)
-    || (input?.email !== undefined && String(input.email).trim().toLowerCase() !== existing.email.toLowerCase());
-  const normalized = normalizeHotmailAccount({
-    ...(existing || {}),
-    ...(credentialsChanged ? {
-      status: 'pending',
-      lastAuthAt: 0,
-      lastError: '',
-    } : {}),
-    ...input,
-    id: input?.id || existing?.id || crypto.randomUUID(),
-  });
-
-  const nextAccounts = existing
-    ? accounts.map((account) => (account.id === normalized.id ? normalized : account))
-    : [...accounts, normalized];
-
-  await syncHotmailAccounts(nextAccounts);
-  return normalized;
-}
-
-async function deleteHotmailAccount(accountId) {
-  const state = await getState();
-  const accounts = normalizeHotmailAccounts(state.hotmailAccounts);
-  const nextAccounts = accounts.filter((account) => account.id !== accountId);
-  await syncHotmailAccounts(nextAccounts);
-
-  if (state.currentHotmailAccountId === accountId) {
-    await setState({ currentHotmailAccountId: null });
-    if (isHotmailProvider(state)) {
-      await setEmailState(null);
-    }
-    broadcastDataUpdate({ currentHotmailAccountId: null });
-  }
-}
-
-async function deleteHotmailAccounts(mode = 'all') {
-  const state = await getState();
-  const accounts = normalizeHotmailAccounts(state.hotmailAccounts);
-  const targets = filterHotmailAccountsByUsage(accounts, mode);
-  const targetIds = new Set(targets.map((account) => account.id));
-  const nextAccounts = mode === 'used'
-    ? accounts.filter((account) => !targetIds.has(account.id))
-    : [];
-
-  await syncHotmailAccounts(nextAccounts);
-
-  if (state.currentHotmailAccountId && targetIds.has(state.currentHotmailAccountId)) {
-    await setState({ currentHotmailAccountId: null });
-    if (isHotmailProvider(state)) {
-      await setEmailState(null);
-    }
-    broadcastDataUpdate({ currentHotmailAccountId: null });
+  if (step === 4 && signupRequestedAt) {
+    return Math.max(0, signupRequestedAt - bufferMs);
   }
 
-  return {
-    deletedCount: targets.length,
-    remainingCount: nextAccounts.length,
+  if (step === 7 && loginRequestedAt) {
+    return Math.max(0, loginRequestedAt - bufferMs);
+  }
+
+  return step === 7
+    ? (lastEmailTimestamp || flowStartTime || 0)
+    : (flowStartTime || 0);
+}
+
+function generateMoemailLocalPart(length = 10) {
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  let result = chars[Math.floor(Math.random() * 26)];
+  for (let index = 1; index < length; index += 1) {
+    result += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return result;
+}
+
+async function requestMoemail(endpoint, options = {}, overrides = {}) {
+  const settings = {
+    ...getMoemailSettings(await getState()),
+    ...overrides,
   };
-}
+  settings.baseUrl = normalizeMoemailApiBaseUrl(settings.baseUrl);
+  settings.apiKey = normalizeMoemailApiKey(settings.apiKey);
 
-async function patchHotmailAccount(accountId, updates = {}) {
-  const state = await getState();
-  const accounts = normalizeHotmailAccounts(state.hotmailAccounts);
-  const account = findHotmailAccount(accounts, accountId);
-  if (!account) {
-    throw new Error('未找到对应的 Hotmail 账号。');
+  if (!settings.apiKey) {
+    throw new Error('请先填写 MoeMail API Key。');
   }
 
-  const nextAccount = normalizeHotmailAccount({
-    ...account,
-    ...updates,
-    id: account.id,
-  });
-
-  await syncHotmailAccounts(accounts.map((item) => (item.id === account.id ? nextAccount : item)));
-
-  if (state.currentHotmailAccountId === account.id && shouldClearHotmailCurrentSelection(nextAccount)) {
-    await setState({ currentHotmailAccountId: null });
-    broadcastDataUpdate({ currentHotmailAccountId: null });
-    if (isHotmailProvider(state)) {
-      await setEmailState(null);
-    }
-  }
-
-  return nextAccount;
-}
-
-async function setCurrentHotmailAccount(accountId, options = {}) {
-  const { markUsed = false, syncEmail = true } = options;
-  const state = await getState();
-  const accounts = normalizeHotmailAccounts(state.hotmailAccounts);
-  const account = findHotmailAccount(accounts, accountId);
-  if (!account) {
-    throw new Error('未找到对应的 Hotmail 账号。');
-  }
-
-  if (markUsed) {
-    account.lastUsedAt = Date.now();
-    await syncHotmailAccounts(accounts.map((item) => (item.id === account.id ? account : item)));
-  }
-
-  await setState({ currentHotmailAccountId: account.id });
-  broadcastDataUpdate({ currentHotmailAccountId: account.id });
-  if (syncEmail) {
-    await setEmailState(account.email || null);
-  }
-  return account;
-}
-
-async function ensureHotmailAccountForFlow(options = {}) {
-  const { allowAllocate = true, markUsed = false, preferredAccountId = null } = options;
-  const state = await getState();
-  const accounts = normalizeHotmailAccounts(state.hotmailAccounts);
-  const isAccountAllocatable = (candidate) => Boolean(candidate)
-    && candidate.status === 'authorized'
-    && !candidate.used
-    && Boolean(candidate.refreshToken);
-
-  let account = null;
-  if (preferredAccountId) {
-    account = findHotmailAccount(accounts, preferredAccountId);
-  }
-  if (!account && state.currentHotmailAccountId) {
-    account = findHotmailAccount(accounts, state.currentHotmailAccountId);
-  }
-  if ((!account || !isAccountAllocatable(account)) && allowAllocate) {
-    account = pickHotmailAccountForRun(accounts, {});
-  }
-
-  if (!account) {
-    throw new Error('没有可用的 Hotmail 账号。请先在侧边栏添加至少一个带刷新令牌（refresh token）的账号。');
-  }
-  if (!isAccountAllocatable(account)) {
-    throw new Error(`Hotmail 账号 ${account.email || account.id} 尚未就绪，无法读取邮件。`);
-  }
-
-  return setCurrentHotmailAccount(account.id, { markUsed, syncEmail: true });
-}
-
-function buildHotmailRemoteEndpoint(baseUrl, path) {
-  const normalizedBaseUrl = normalizeHotmailRemoteBaseUrl(baseUrl);
-  return new URL(path, `${normalizedBaseUrl}/`).toString();
-}
-
-function buildHotmailLocalEndpoint(baseUrl, path) {
-  const normalizedBaseUrl = normalizeHotmailLocalBaseUrl(baseUrl);
-  return new URL(path, `${normalizedBaseUrl}/`).toString();
-}
-
-async function requestHotmailRemoteMailbox(account, mailbox = 'INBOX') {
-  if (!account?.email) {
-    throw new Error('Hotmail 账号缺少邮箱地址。');
-  }
-  if (!account?.clientId) {
-    throw new Error(`Hotmail 账号 ${account.email || account.id} 缺少客户端 ID。`);
-  }
-  if (!account?.refreshToken) {
-    throw new Error(`Hotmail 账号 ${account.email || account.id} 缺少刷新令牌（refresh token）。`);
-  }
-
-  const serviceSettings = getHotmailServiceSettings(await getState());
-  const url = buildHotmailMailApiLatestUrl({
-    apiUrl: buildHotmailRemoteEndpoint(serviceSettings.remoteBaseUrl, '/api/mail-new'),
-    clientId: account.clientId,
-    email: account.email,
-    refreshToken: account.refreshToken,
-    mailbox,
-    responseType: 'json',
-  });
-  const { timeoutMs } = getHotmailMailApiRequestConfig();
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(new Error('timeout')), timeoutMs);
+  const timeoutId = setTimeout(() => controller.abort(new Error('timeout')), MOEMAIL_REQUEST_TIMEOUT_MS);
+  const requestUrl = buildMoemailApiUrl(settings.baseUrl, endpoint);
 
   let response;
   try {
-    response = await fetch(url, { method: 'GET', signal: controller.signal });
+    response = await fetch(requestUrl, {
+      method: options.method || 'GET',
+      headers: {
+        'X-API-Key': settings.apiKey,
+        'Content-Type': 'application/json',
+      },
+      body: options.body ? JSON.stringify(options.body) : undefined,
+      signal: controller.signal,
+    });
   } catch (err) {
     if (err?.name === 'AbortError') {
-      throw new Error(`Hotmail API 请求超时（>${Math.round(timeoutMs / 1000)} 秒）：${mailbox}`);
+      throw new Error(`MoeMail API 请求超时（>${Math.round(MOEMAIL_REQUEST_TIMEOUT_MS / 1000)} 秒）`);
     }
-    throw new Error(`Hotmail API 请求失败：${err.message}`);
+    throw new Error(`MoeMail API 请求失败：${err.message}`);
   } finally {
     clearTimeout(timeoutId);
   }
@@ -864,339 +657,189 @@ async function requestHotmailRemoteMailbox(account, mailbox = 'INBOX') {
   }
 
   if (!response.ok) {
-    const errorText = payload?.message || payload?.error || payload?.msg || text || `HTTP ${response.status}`;
-    throw new Error(`Hotmail API 请求失败：${errorText}`);
+    const errorText = payload?.error || payload?.message || text || `HTTP ${response.status}`;
+    throw new Error(`MoeMail API 请求失败：${errorText}`);
   }
 
   if (payload && payload.success === false) {
-    const errorText = payload?.message || payload?.msg || payload?.error || '未知错误';
-    throw new Error(`Hotmail API 返回失败：${errorText}`);
+    const errorText = payload?.error || payload?.message || '未知错误';
+    throw new Error(`MoeMail API 返回失败：${errorText}`);
   }
 
-  return {
-    mailbox,
-    payload,
-    messages: normalizeHotmailMailApiMessages(payload?.data),
-    nextRefreshToken: String(payload?.new_refresh_token || payload?.newRefreshToken || '').trim(),
-  };
+  return payload;
 }
 
-function applyHotmailApiResultToAccount(account, apiResult) {
-  const nextRefreshToken = String(apiResult?.nextRefreshToken || '').trim();
-  return {
-    ...account,
-    refreshToken: nextRefreshToken || account.refreshToken,
-    status: 'authorized',
-    lastAuthAt: Date.now(),
-    lastError: '',
-  };
+async function fetchMoemailDomains(state = null) {
+  const settings = getMoemailSettings(state || await getState());
+  const config = await requestMoemail('/api/config', {}, settings);
+  const domains = parseMoemailConfigDomains(config);
+  if (!domains.length) {
+    throw new Error('未获取到 MoeMail 可用域名。');
+  }
+  return domains;
 }
 
-function buildHotmailMailApiFailureAccount(account, errorMessage) {
-  return normalizeHotmailAccount({
-    ...account,
-    status: 'error',
-    lastError: String(errorMessage || ''),
-  });
-}
-
-async function fetchHotmailMailboxMessagesFromRemoteService(account, mailboxes = HOTMAIL_MAILBOXES) {
-  let workingAccount = normalizeHotmailAccount(account);
-  const mailboxResults = [];
-
-  try {
-    for (const mailbox of mailboxes) {
-      const result = await requestHotmailRemoteMailbox(workingAccount, mailbox);
-      workingAccount = applyHotmailApiResultToAccount(workingAccount, result);
-      mailboxResults.push({
-        mailbox,
-        count: result.messages.length,
-        messages: result.messages.map((message) => ({ ...message, mailbox })),
-      });
-    }
-  } catch (err) {
-    const failedAccount = buildHotmailMailApiFailureAccount(workingAccount, err.message);
-    await upsertHotmailAccount(failedAccount);
-    throw err;
+async function findMoemailEmailByAddress(address, state = null) {
+  const normalizedAddress = String(address || '').trim().toLowerCase();
+  if (!normalizedAddress) {
+    return null;
   }
 
-  const savedAccount = await upsertHotmailAccount(workingAccount);
-  return {
-    account: savedAccount,
-    mailboxResults,
-    messages: mailboxResults.flatMap((item) => item.messages),
-  };
-}
+  const settings = getMoemailSettings(state || await getState());
+  let cursor = '';
 
-async function requestHotmailLocalMessages(account, mailboxes = HOTMAIL_MAILBOXES) {
-  if (!account?.email) {
-    throw new Error('Hotmail 账号缺少邮箱地址。');
-  }
-  if (!account?.clientId) {
-    throw new Error(`Hotmail 账号 ${account.email || account.id} 缺少客户端 ID。`);
-  }
-  if (!account?.refreshToken) {
-    throw new Error(`Hotmail 账号 ${account.email || account.id} 缺少刷新令牌（refresh token）。`);
-  }
-
-  const serviceSettings = getHotmailServiceSettings(await getState());
-  const { timeoutMs } = getHotmailMailApiRequestConfig();
-  const requestTimeoutMs = Math.max(timeoutMs, HOTMAIL_LOCAL_HELPER_TIMEOUT_MS);
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(new Error('timeout')), requestTimeoutMs);
-
-  let response;
-  try {
-    response = await fetch(buildHotmailLocalEndpoint(serviceSettings.localBaseUrl, '/messages'), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-      body: JSON.stringify({
-        email: account.email,
-        clientId: account.clientId,
-        refreshToken: account.refreshToken,
-        mailboxes,
-        top: 5,
-      }),
-      signal: controller.signal,
+  do {
+    const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : '';
+    const payload = await requestMoemail(`/api/emails${query}`, {}, settings);
+    const emails = Array.isArray(payload?.emails) ? payload.emails : [];
+    const matched = emails.find((item) => {
+      const candidate = String(item?.email || item?.address || '').trim().toLowerCase();
+      return candidate === normalizedAddress;
     });
-  } catch (err) {
-    if (err?.name === 'AbortError') {
-      throw new Error(`Hotmail 本地助手请求超时（>${Math.round(requestTimeoutMs / 1000)} 秒）`);
+    if (matched) {
+      return {
+        id: String(matched.id || '').trim(),
+        email: String(matched.email || matched.address || address).trim(),
+      };
     }
-    throw new Error(`Hotmail 本地助手请求失败：${err.message}`);
-  } finally {
-    clearTimeout(timeoutId);
-  }
+    cursor = String(payload?.nextCursor || payload?.next_cursor || '').trim();
+  } while (cursor);
 
-  const text = await response.text();
-  let payload = {};
-  try {
-    payload = text ? JSON.parse(text) : {};
-  } catch {
-    payload = { raw: text };
-  }
-
-  if (!response.ok || payload?.ok === false) {
-    const errorText = payload?.error || payload?.message || text || `HTTP ${response.status}`;
-    throw new Error(`Hotmail 本地助手返回失败：${errorText}`);
-  }
-
-  const rawMessages = Array.isArray(payload?.messages) ? payload.messages : [];
-  const normalizedMessages = normalizeHotmailMailApiMessages(rawMessages).map((message, index) => ({
-    ...message,
-    mailbox: rawMessages[index]?.mailbox || 'INBOX',
-    receivedTimestamp: Number(rawMessages[index]?.receivedTimestamp || 0) || 0,
-  }));
-  const mailboxResults = Array.isArray(payload?.mailboxResults)
-    ? payload.mailboxResults.map((item) => ({
-      mailbox: String(item?.mailbox || 'INBOX'),
-      count: Number(item?.count || 0),
-      messages: normalizedMessages.filter((message) => String(message.mailbox || 'INBOX') === String(item?.mailbox || 'INBOX')),
-    }))
-    : mailboxes.map((mailbox) => ({
-      mailbox,
-      count: normalizedMessages.filter((message) => String(message.mailbox || 'INBOX') === mailbox).length,
-      messages: normalizedMessages.filter((message) => String(message.mailbox || 'INBOX') === mailbox),
-    }));
-
-  const nextAccount = applyHotmailApiResultToAccount(account, {
-    nextRefreshToken: String(payload?.nextRefreshToken || '').trim(),
-  });
-  const savedAccount = await upsertHotmailAccount(nextAccount);
-  return {
-    account: savedAccount,
-    mailboxResults,
-    messages: normalizedMessages,
-  };
+  return null;
 }
 
-async function requestHotmailLocalCode(account, pollPayload = {}) {
-  if (!account?.email) {
-    throw new Error('Hotmail 账号缺少邮箱地址。');
+async function createMoemailEmail(state = null, options = {}) {
+  const latestState = state || await getState();
+  const settings = getMoemailSettings(latestState);
+  let domain = normalizeMoemailDomain(options.domain || settings.domain);
+  if (!domain) {
+    const domains = await fetchMoemailDomains(latestState);
+    domain = domains[0] || '';
   }
-  if (!account?.clientId) {
-    throw new Error(`Hotmail 账号 ${account.email || account.id} 缺少客户端 ID。`);
-  }
-  if (!account?.refreshToken) {
-    throw new Error(`Hotmail 账号 ${account.email || account.id} 缺少刷新令牌（refresh token）。`);
-  }
-
-  const serviceSettings = getHotmailServiceSettings(await getState());
-  const { timeoutMs } = getHotmailMailApiRequestConfig();
-  const requestTimeoutMs = Math.max(timeoutMs, HOTMAIL_LOCAL_HELPER_TIMEOUT_MS);
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(new Error('timeout')), requestTimeoutMs);
-
-  let response;
-  try {
-    response = await fetch(buildHotmailLocalEndpoint(serviceSettings.localBaseUrl, '/code'), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-      body: JSON.stringify({
-        email: account.email,
-        clientId: account.clientId,
-        refreshToken: account.refreshToken,
-        mailboxes: HOTMAIL_MAILBOXES,
-        top: 5,
-        senderFilters: pollPayload.senderFilters || [],
-        subjectFilters: pollPayload.subjectFilters || [],
-        excludeCodes: pollPayload.excludeCodes || [],
-        filterAfterTimestamp: Number(pollPayload.filterAfterTimestamp || 0) || 0,
-      }),
-      signal: controller.signal,
-    });
-  } catch (err) {
-    if (err?.name === 'AbortError') {
-      throw new Error(`Hotmail 本地助手请求超时（>${Math.round(requestTimeoutMs / 1000)} 秒）`);
-    }
-    throw new Error(`Hotmail 本地助手请求失败：${err.message}`);
-  } finally {
-    clearTimeout(timeoutId);
+  if (!domain) {
+    throw new Error('MoeMail 没有可用域名，无法创建邮箱。');
   }
 
-  const text = await response.text();
-  let payload = {};
-  try {
-    payload = text ? JSON.parse(text) : {};
-  } catch {
-    payload = { raw: text };
+  const name = String(options.prefix || latestState.emailPrefix || '').trim() || generateMoemailLocalPart(10);
+  const payload = await requestMoemail('/api/emails/generate', {
+    method: 'POST',
+    body: {
+      expiryTime: 0,
+      domain,
+      name,
+    },
+  }, settings);
+
+  const email = String(payload?.email || payload?.address || '').trim();
+  const emailId = String(payload?.id || '').trim();
+  if (!email || !emailId) {
+    throw new Error('MoeMail 创建邮箱失败。');
   }
 
-  if (!response.ok || payload?.ok === false) {
-    const errorText = payload?.error || payload?.message || text || `HTTP ${response.status}`;
-    throw new Error(`Hotmail 本地助手返回失败：${errorText}`);
-  }
-
-  const normalizedMessage = payload?.message
-    ? {
-      ...normalizeHotmailMailApiMessages([payload.message])[0],
-      mailbox: payload?.message?.mailbox || 'INBOX',
-      receivedTimestamp: Number(payload?.message?.receivedTimestamp || 0) || 0,
-    }
-    : null;
-  const nextAccount = applyHotmailApiResultToAccount(account, {
-    nextRefreshToken: String(payload?.nextRefreshToken || '').trim(),
-  });
-  const savedAccount = await upsertHotmailAccount(nextAccount);
-  return {
-    account: savedAccount,
-    code: String(payload?.code || ''),
-    message: normalizedMessage,
-    usedTimeFallback: Boolean(payload?.usedTimeFallback),
-    selectionSource: String(payload?.selectionSource || ''),
-  };
+  return { email, emailId, domain };
 }
 
-async function pollHotmailVerificationCodeViaLocalHelper(step, account, pollPayload = {}) {
-  const maxAttempts = Number(pollPayload.maxAttempts) || 5;
-  const intervalMs = Number(pollPayload.intervalMs) || 3000;
-  let workingAccount = account;
-  let lastError = null;
+async function fetchMoemailMailboxMessages(address, options = {}) {
+  const latestState = await getState();
+  const settings = getMoemailSettings(latestState);
+  let targetId = String(options.emailId || latestState.moemailEmailId || '').trim();
+  let resolvedEmail = String(address || latestState.email || '').trim();
 
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    throwIfStopped();
-    try {
-      await addLog(`步骤 ${step}：正在通过本地助手轮询 Hotmail 验证码（${attempt}/${maxAttempts}）...`, 'info');
-      const fetchResult = await requestHotmailLocalCode(workingAccount, pollPayload);
-      workingAccount = fetchResult.account;
+  if (!targetId) {
+    const matchedEmail = await findMoemailEmailByAddress(resolvedEmail, latestState);
+    targetId = String(matchedEmail?.id || '').trim();
+    resolvedEmail = String(matchedEmail?.email || resolvedEmail).trim();
+  }
 
-      if (fetchResult.code) {
-        const mailboxLabel = fetchResult.message?.mailbox || 'INBOX';
-        if (fetchResult.usedTimeFallback) {
-          await addLog(`步骤 ${step}：本地助手使用时间回退后命中 Hotmail ${mailboxLabel} 验证码。`, 'warn');
-        }
-        await addLog(`步骤 ${step}：已通过本地助手在 Hotmail ${mailboxLabel} 中找到验证码：${fetchResult.code}`, 'ok');
-        return {
-          ok: true,
-          code: fetchResult.code,
-          emailTimestamp: fetchResult.message?.receivedTimestamp || Date.now(),
-          mailId: fetchResult.message?.id || '',
-        };
+  if (!targetId) {
+    return { emailId: '', email: resolvedEmail, messages: [] };
+  }
+
+  let listPayload;
+  try {
+    listPayload = await requestMoemail(`/api/emails/${encodeURIComponent(targetId)}`, {}, settings);
+  } catch (err) {
+    if (!String(options.emailId || latestState.moemailEmailId || '').trim()) {
+      throw err;
+    }
+
+    const matchedEmail = await findMoemailEmailByAddress(resolvedEmail, latestState);
+    targetId = String(matchedEmail?.id || '').trim();
+    resolvedEmail = String(matchedEmail?.email || resolvedEmail).trim();
+    if (!targetId) {
+      return { emailId: '', email: resolvedEmail, messages: [] };
+    }
+
+    listPayload = await requestMoemail(`/api/emails/${encodeURIComponent(targetId)}`, {}, settings);
+  }
+
+  const messageRefs = Array.isArray(listPayload?.messages) ? listPayload.messages.slice(0, MOEMAIL_MAX_MESSAGE_DETAILS) : [];
+  if (!messageRefs.length) {
+    return { emailId: targetId, email: resolvedEmail, messages: [] };
+  }
+
+  const settledDetails = await Promise.allSettled(
+    messageRefs.map(async (item) => {
+      const messageId = String(item?.id || item?.messageId || item?.message_id || '').trim();
+      if (!messageId) {
+        return item;
       }
 
-      lastError = new Error(`步骤 ${step}：本地助手暂未返回匹配验证码（${attempt}/${maxAttempts}）。`);
-      await addLog(lastError.message, attempt === maxAttempts ? 'warn' : 'info');
-    } catch (err) {
-      lastError = err;
-      await addLog(`步骤 ${step}：本地助手轮询 Hotmail 失败：${err.message}`, 'warn');
-    }
+      const detailPayload = await requestMoemail(
+        `/api/emails/${encodeURIComponent(targetId)}/${encodeURIComponent(messageId)}`,
+        {},
+        settings
+      );
+      const detailMessage = detailPayload?.message && typeof detailPayload.message === 'object'
+        ? detailPayload.message
+        : {};
+      return {
+        ...item,
+        ...detailMessage,
+        id: messageId,
+      };
+    })
+  );
 
-    if (attempt < maxAttempts) {
-      await sleepWithStop(intervalMs);
-    }
-  }
+  const messages = normalizeMoemailMessages(
+    settledDetails.map((result, index) => (
+      result.status === 'fulfilled'
+        ? result.value
+        : messageRefs[index]
+    ))
+  );
 
-  throw lastError || new Error(`步骤 ${step}：本地助手未返回新的匹配验证码。`);
-}
-
-async function fetchHotmailMailboxMessages(account, mailboxes = HOTMAIL_MAILBOXES) {
-  const serviceSettings = getHotmailServiceSettings(await getState());
-  if (serviceSettings.mode === HOTMAIL_SERVICE_MODE_LOCAL) {
-    return requestHotmailLocalMessages(account, mailboxes);
-  }
-  return fetchHotmailMailboxMessagesFromRemoteService(account, mailboxes);
-}
-
-async function verifyHotmailAccount(accountId) {
-  const state = await getState();
-  const account = findHotmailAccount(state.hotmailAccounts, accountId);
-  if (!account) {
-    throw new Error('未找到需要校验的 Hotmail 账号。');
-  }
-
-  const result = await fetchHotmailMailboxMessages(account, ['INBOX']);
   return {
-    account: result.account,
-    messageCount: result.mailboxResults[0]?.count || 0,
+    emailId: targetId,
+    email: resolvedEmail,
+    messages,
   };
 }
 
-async function testHotmailAccountMailAccess(accountId) {
-  const state = await getState();
-  const account = findHotmailAccount(state.hotmailAccounts, accountId);
-  if (!account) {
-    throw new Error('未找到需要测试的 Hotmail 账号。');
-  }
-
-  const result = await fetchHotmailMailboxMessages(account, HOTMAIL_MAILBOXES);
-  const latestMessage = getLatestHotmailMessage(result.messages);
-  const latestCode = latestMessage ? extractVerificationCodeFromMessage(latestMessage) : null;
-
-  return {
-    account: result.account,
-    accountId: result.account.id,
-    email: result.account.email,
-    messageCount: result.messages.length,
-    latestSubject: latestMessage?.subject || '',
-    latestMailbox: latestMessage?.mailbox || '',
-    latestCode: latestCode || '',
-    inboxCount: result.mailboxResults.find((item) => item.mailbox === 'INBOX')?.count || 0,
-    junkCount: result.mailboxResults.find((item) => item.mailbox === 'Junk')?.count || 0,
-  };
-}
-
-async function pollHotmailVerificationCode(step, state, pollPayload = {}) {
-  await addLog(`步骤 ${step}：正在确定 Hotmail 收信账号...`, 'info');
-  let account = await ensureHotmailAccountForFlow({
-    allowAllocate: true,
-    markUsed: false,
-    preferredAccountId: state.currentHotmailAccountId || null,
+async function fetchMoemailGeneratedEmail(state, options = {}) {
+  throwIfStopped();
+  const latestState = state || await getState();
+  const result = await createMoemailEmail(latestState, {
+    prefix: options.prefix,
+    domain: options.domain,
   });
-  await addLog(`步骤 ${step}：当前使用 Hotmail 账号 ${account.email} 轮询收件箱。`, 'info');
 
-  const serviceSettings = getHotmailServiceSettings(state);
-  if (serviceSettings.mode === HOTMAIL_SERVICE_MODE_LOCAL) {
-    return pollHotmailVerificationCodeViaLocalHelper(step, account, pollPayload);
+  await setEmailStateSilently(result.email, { moemailEmailId: result.emailId });
+  await addLog(`MoeMail：已生成 ${result.email}`, 'ok');
+  return result.email;
+}
+
+async function pollMoemailVerificationCode(step, state, pollPayload = {}) {
+  const targetEmail = String(state.email || '').trim();
+  if (!targetEmail) {
+    throw new Error('当前没有 MoeMail 注册邮箱。');
   }
+
+  await addLog(`步骤 ${step}：当前使用 MoeMail 邮箱 ${targetEmail} 轮询验证码。`, 'info');
 
   const maxAttempts = Number(pollPayload.maxAttempts) || 5;
   const intervalMs = Number(pollPayload.intervalMs) || 3000;
+  let currentEmailId = String(state.moemailEmailId || '').trim();
   let lastError = null;
 
   function summarizeMessagesForLog(messages) {
@@ -1213,49 +856,58 @@ async function pollHotmailVerificationCode(step, state, pollPayload = {}) {
         const sender = message?.from?.emailAddress?.address || '未知发件人';
         const subject = message?.subject || '（无主题）';
         const preview = String(message?.bodyPreview || '').replace(/\s+/g, ' ').trim().slice(0, 80);
-        return `[${message.mailbox || 'INBOX'}] ${receivedAt} | ${sender} | ${subject} | ${preview}`;
+        return `${receivedAt} | ${sender} | ${subject} | ${preview}`;
       })
       .join(' || ');
   }
 
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     throwIfStopped();
     try {
-      await addLog(`步骤 ${step}：正在轮询 Hotmail 邮件（${attempt}/${maxAttempts}）...`, 'info');
-      const fetchResult = await fetchHotmailMailboxMessages(account, HOTMAIL_MAILBOXES);
-      account = fetchResult.account;
-      const matchResult = pickVerificationMessageWithTimeFallback(fetchResult.messages, {
-        afterTimestamp: pollPayload.filterAfterTimestamp || 0,
-        senderFilters: pollPayload.senderFilters || [],
-        subjectFilters: pollPayload.subjectFilters || [],
-        excludeCodes: pollPayload.excludeCodes || [],
-      });
-      const match = matchResult.match;
-
-      if (match?.code) {
-        const mailboxLabel = match.message?.mailbox || 'INBOX';
-        if (matchResult.usedRelaxedFilters) {
-          const fallbackLabel = matchResult.usedTimeFallback ? '宽松匹配 + 时间回退' : '宽松匹配';
-          await addLog(`步骤 ${step}：严格规则未命中，已改用 ${fallbackLabel} 并命中 Hotmail ${mailboxLabel} 验证码。`, 'warn');
-        }
-        await addLog(`步骤 ${step}：已在 Hotmail ${mailboxLabel} 中找到验证码：${match.code}`, 'ok');
-        return {
-          ok: true,
-          code: match.code,
-          emailTimestamp: match.receivedAt || Date.now(),
-          mailId: match.message?.id || '',
-        };
+      await addLog(`步骤 ${step}：正在轮询 MoeMail 邮件（${attempt}/${maxAttempts}）...`, 'info');
+      const fetchResult = await fetchMoemailMailboxMessages(targetEmail, { emailId: currentEmailId });
+      currentEmailId = String(fetchResult.emailId || '').trim();
+      if (currentEmailId && currentEmailId !== String(state.moemailEmailId || '').trim()) {
+        await setState({ moemailEmailId: currentEmailId });
+        broadcastDataUpdate({ moemailEmailId: currentEmailId });
+        state = { ...state, moemailEmailId: currentEmailId };
       }
 
-      lastError = new Error(`步骤 ${step}：暂未在 Hotmail 收件箱中找到匹配验证码（${attempt}/${maxAttempts}）。`);
-      await addLog(lastError.message, attempt === maxAttempts ? 'warn' : 'info');
-      const mailSummary = summarizeMessagesForLog(fetchResult.messages);
-      if (mailSummary) {
-        await addLog(`步骤 ${step}：最近邮件样本：${mailSummary}`, 'info');
+      if (!fetchResult.messages.length) {
+        lastError = new Error(`步骤 ${step}：暂未在 MoeMail 中读取到邮件（${attempt}/${maxAttempts}）。`);
+        await addLog(lastError.message, attempt === maxAttempts ? 'warn' : 'info');
+      } else {
+        const matchResult = pickVerificationMessageWithTimeFallback(fetchResult.messages, {
+          afterTimestamp: pollPayload.filterAfterTimestamp || 0,
+          senderFilters: pollPayload.senderFilters || [],
+          subjectFilters: pollPayload.subjectFilters || [],
+          excludeCodes: pollPayload.excludeCodes || [],
+        });
+        const match = matchResult.match;
+
+        if (match?.code) {
+          if (matchResult.usedTimeFallback) {
+            await addLog(`步骤 ${step}：MoeMail 使用时间回退后命中验证码。`, 'warn');
+          }
+          await addLog(`步骤 ${step}：已在 MoeMail 中找到验证码：${match.code}`, 'ok');
+          return {
+            ok: true,
+            code: match.code,
+            emailTimestamp: match.receivedAt || Date.now(),
+            mailId: match.message?.id || '',
+          };
+        }
+
+        lastError = new Error(`步骤 ${step}：暂未在 MoeMail 中找到匹配验证码（${attempt}/${maxAttempts}）。`);
+        await addLog(lastError.message, attempt === maxAttempts ? 'warn' : 'info');
+        const mailSummary = summarizeMessagesForLog(fetchResult.messages);
+        if (mailSummary) {
+          await addLog(`步骤 ${step}：最近邮件样本：${mailSummary}`, 'info');
+        }
       }
     } catch (err) {
       lastError = err;
-      await addLog(`步骤 ${step}：Hotmail 收件箱轮询失败：${err.message}`, 'warn');
+      await addLog(`步骤 ${step}：MoeMail 轮询失败：${err.message}`, 'warn');
     }
 
     if (attempt < maxAttempts) {
@@ -1263,7 +915,7 @@ async function pollHotmailVerificationCode(step, state, pollPayload = {}) {
     }
   }
 
-  throw lastError || new Error(`步骤 ${step}：未在 Hotmail 收件箱中找到新的匹配验证码。`);
+  throw lastError || new Error(`步骤 ${step}：未在 MoeMail 中找到新的匹配验证码。`);
 }
 
 function generateRandomSuffix(length = 6) {
@@ -1281,8 +933,7 @@ function isGeneratedAliasProvider(provider) {
 
 function shouldUseCustomRegistrationEmail(state = {}) {
   return isCustomMailProvider(state)
-    || (!isHotmailProvider(state)
-      && !isGeneratedAliasProvider(state.mailProvider)
+    || (!isGeneratedAliasProvider(state.mailProvider)
       && normalizeEmailGenerator(state.emailGenerator) === 'custom');
 }
 
@@ -2122,7 +1773,7 @@ function getSourceLabel(source) {
     'mail-2925': '2925 邮箱',
     'inbucket-mail': 'Inbucket 邮箱',
     'duck-mail': 'Duck 邮箱',
-    'hotmail-api': 'Hotmail（远程/本地）',
+    'moemail': 'MoeMail',
   };
   return labels[source] || source || '未知来源';
 }
@@ -2159,7 +1810,7 @@ function getErrorMessage(error) {
 
 function isVerificationMailPollingError(error) {
   const message = getErrorMessage(error);
-  return /未在 .*邮箱中找到新的匹配邮件|未在 Hotmail 收件箱中找到新的匹配验证码|邮箱轮询结束，但未获取到验证码|无法获取新的(?:注册|登录)验证码|页面未能重新就绪|页面通信异常|did not respond in \d+s/i.test(message);
+  return /未在 .*邮箱中找到新的匹配邮件|未在 MoeMail 中找到新的匹配验证码|邮箱轮询结束，但未获取到验证码|无法获取新的(?:注册|登录)验证码|页面未能重新就绪|页面通信异常|did not respond in \d+s/i.test(message);
 }
 
 const STEP7_RESTART_FROM_STEP6_ERROR_CODE = 'STEP7_RESTART_FROM_STEP6';
@@ -2947,63 +2598,6 @@ async function handleMessage(message, sender) {
       return { ok: true, state };
     }
 
-    case 'UPSERT_HOTMAIL_ACCOUNT': {
-      const account = await upsertHotmailAccount(message.payload || {});
-      return { ok: true, account };
-    }
-
-    case 'DELETE_HOTMAIL_ACCOUNT': {
-      await deleteHotmailAccount(String(message.payload?.accountId || ''));
-      return { ok: true };
-    }
-
-    case 'DELETE_HOTMAIL_ACCOUNTS': {
-      const result = await deleteHotmailAccounts(String(message.payload?.mode || 'all'));
-      return { ok: true, ...result };
-    }
-
-    case 'SELECT_HOTMAIL_ACCOUNT': {
-      const account = await setCurrentHotmailAccount(String(message.payload?.accountId || ''), {
-        markUsed: false,
-        syncEmail: true,
-      });
-      return { ok: true, account };
-    }
-
-    case 'PATCH_HOTMAIL_ACCOUNT': {
-      const account = await patchHotmailAccount(
-        String(message.payload?.accountId || ''),
-        message.payload?.updates || {}
-      );
-      return { ok: true, account };
-    }
-
-    case 'VERIFY_HOTMAIL_ACCOUNT':
-    case 'AUTHORIZE_HOTMAIL_ACCOUNT': {
-      const accountId = String(message.payload?.accountId || '');
-      try {
-        const result = await verifyHotmailAccount(accountId);
-        await setCurrentHotmailAccount(result.account.id, { markUsed: false, syncEmail: true });
-        await addLog(`Hotmail 账号 ${result.account.email} 校验通过，可直接用于收信。`, 'ok');
-        return { ok: true, account: result.account, messageCount: result.messageCount };
-      } catch (err) {
-        const state = await getState();
-        const accounts = normalizeHotmailAccounts(state.hotmailAccounts);
-        const target = findHotmailAccount(accounts, accountId);
-        if (target) {
-          target.status = 'error';
-          target.lastError = err.message;
-          await syncHotmailAccounts(accounts.map((item) => (item.id === target.id ? target : item)));
-        }
-        throw err;
-      }
-    }
-
-    case 'TEST_HOTMAIL_ACCOUNT': {
-      const result = await testHotmailAccountMailAccess(String(message.payload?.accountId || ''));
-      return { ok: true, ...result };
-    }
-
     // Side panel data updates
     case 'SET_EMAIL_STATE': {
       const state = await getState();
@@ -3119,13 +2713,6 @@ async function handleStepData(step, payload) {
         await closeLocalhostCallbackTabs(payload.localhostUrl);
       }
       const latestState = await getState();
-      if (latestState.currentHotmailAccountId && isHotmailProvider(latestState)) {
-        await patchHotmailAccount(latestState.currentHotmailAccountId, {
-          used: true,
-          lastUsedAt: Date.now(),
-        });
-        await addLog('当前 Hotmail 账号已自动标记为已用。', 'ok');
-      }
       const localhostPrefix = buildLocalhostCleanupPrefix(payload.localhostUrl);
       if (localhostPrefix) {
         await closeTabsByUrlPrefix(localhostPrefix);
@@ -3488,6 +3075,9 @@ async function fetchDuckEmail(options = {}) {
 
 async function fetchGeneratedEmail(state, options = {}) {
   const currentState = state || await getState();
+  if (isMoemailProvider(currentState)) {
+    return fetchMoemailGeneratedEmail(currentState, options);
+  }
   const generator = normalizeEmailGenerator(options.generator ?? currentState.emailGenerator);
   if (generator === 'custom') {
     throw new Error('当前邮箱生成方式为自定义邮箱，请直接填写注册邮箱。');
@@ -3541,16 +3131,6 @@ async function resumeAutoRunIfWaitingForEmail(options = {}) {
 
 async function ensureAutoEmailReady(targetRun, totalRuns, attemptRuns) {
   const currentState = await getState();
-  if (isHotmailProvider(currentState)) {
-    const account = await ensureHotmailAccountForFlow({
-      allowAllocate: true,
-      markUsed: true,
-      preferredAccountId: null,
-    });
-    await addLog(`=== 目标 ${targetRun}/${totalRuns} 轮：已分配 Hotmail 账号 ${account.email}（第 ${attemptRuns} 次尝试）===`, 'ok');
-    return account.email;
-  }
-
   if (isGeneratedAliasProvider(currentState.mailProvider)) {
     if (!currentState.emailPrefix) {
       throw new Error('2925 邮箱前缀未设置，请先在侧边栏填写。');
@@ -3561,6 +3141,27 @@ async function ensureAutoEmailReady(targetRun, totalRuns, attemptRuns) {
 
   if (currentState.email) {
     return currentState.email;
+  }
+
+  if (isMoemailProvider(currentState)) {
+    let lastError = null;
+    for (let attempt = 1; attempt <= EMAIL_FETCH_MAX_ATTEMPTS; attempt++) {
+      try {
+        if (attempt > 1) {
+          await addLog(`MoeMail：正在进行第 ${attempt}/${EMAIL_FETCH_MAX_ATTEMPTS} 次自动生成重试...`, 'warn');
+        }
+        const generatedEmail = await fetchGeneratedEmail(currentState, { generateNew: true });
+        await addLog(
+          `=== 目标 ${targetRun}/${totalRuns} 轮：MoeMail 邮箱已就绪：${generatedEmail}（第 ${attemptRuns} 次尝试，第 ${attempt}/${EMAIL_FETCH_MAX_ATTEMPTS} 次生成）===`,
+          'ok'
+        );
+        return generatedEmail;
+      } catch (err) {
+        lastError = err;
+        await addLog(`MoeMail 自动生成失败（${attempt}/${EMAIL_FETCH_MAX_ATTEMPTS}）：${err.message}`, 'warn');
+      }
+    }
+    throw lastError || new Error('MoeMail 邮箱生成失败。');
   }
 
   if (shouldUseCustomRegistrationEmail(currentState)) {
@@ -3662,12 +3263,10 @@ async function runAutoSequenceFromStep(startStep, context = {}) {
       await executeStepAndWait(step, AUTO_STEP_DELAYS[step]);
       step += 1;
     } catch (err) {
-      const latestState = await getState();
-      const currentMail = getMailConfig(latestState);
       const shouldRetryStep9 = step === 9
         && (
           isLegacyStep9RecoverableAuthError(err)
-          || (currentMail.provider === HOTMAIL_PROVIDER && isStep9RecoverableAuthError(err))
+          || isStep9RecoverableAuthError(err)
         )
         && step9RestartAttempts < maxStep9RestartAttempts;
 
@@ -3769,6 +3368,9 @@ async function legacyAutoRunLoop(totalRuns, options = {}) {
         emailPrefix: prevState.emailPrefix,
         inbucketHost: prevState.inbucketHost,
         inbucketMailbox: prevState.inbucketMailbox,
+        moemailApiBaseUrl: prevState.moemailApiBaseUrl,
+        moemailApiKey: prevState.moemailApiKey,
+        moemailDomain: prevState.moemailDomain,
         cloudflareDomain: prevState.cloudflareDomain,
         cloudflareDomains: prevState.cloudflareDomains,
         // Fresh attempts must drop stale tab/url runtime state from the prior run.
@@ -4246,6 +3848,9 @@ async function autoRunLoop(totalRuns, options = {}) {
           emailPrefix: prevState.emailPrefix,
           inbucketHost: prevState.inbucketHost,
           inbucketMailbox: prevState.inbucketMailbox,
+          moemailApiBaseUrl: prevState.moemailApiBaseUrl,
+          moemailApiKey: prevState.moemailApiKey,
+          moemailDomain: prevState.moemailDomain,
           cloudflareDomain: prevState.cloudflareDomain,
           cloudflareDomains: prevState.cloudflareDomains,
           autoRunRoundSummaries: serializeAutoRunRoundSummaries(totalRuns, roundSummaries),
@@ -4629,13 +4234,8 @@ async function executeStep2(state) {
 
 async function executeStep3(state) {
   let resolvedEmail = state.email;
-  if (isHotmailProvider(state)) {
-    const account = await ensureHotmailAccountForFlow({
-      allowAllocate: true,
-      markUsed: true,
-      preferredAccountId: state.currentHotmailAccountId || null,
-    });
-    resolvedEmail = account.email;
+  if (isMoemailProvider(state) && !resolvedEmail) {
+    resolvedEmail = await fetchMoemailGeneratedEmail(state, { generateNew: true });
   } else if (isGeneratedAliasProvider(state.mailProvider)) {
     resolvedEmail = buildGeneratedAliasEmail(state);
   }
@@ -4675,8 +4275,8 @@ function getMailConfig(state) {
   if (provider === 'custom') {
     return { provider: 'custom', label: '自定义邮箱' };
   }
-  if (provider === HOTMAIL_PROVIDER) {
-    return { provider: HOTMAIL_PROVIDER, label: 'Hotmail（远程/本地）' };
+  if (provider === MOEMAIL_PROVIDER) {
+    return { provider: MOEMAIL_PROVIDER, label: 'MoeMail' };
   }
   if (provider === '163') {
     return { source: 'mail-163', url: 'https://mail.163.com/js6/main.jsp?df=mail163_letter#module=mbox.ListModule%7C%7B%22fid%22%3A1%2C%22order%22%3A%22date%22%2C%22desc%22%3Atrue%7D', label: '163 邮箱' };
@@ -4769,7 +4369,7 @@ async function confirmCustomVerificationStepBypass(step) {
 function getVerificationPollPayload(step, state, overrides = {}) {
   if (step === 4) {
     return {
-      filterAfterTimestamp: getHotmailVerificationRequestTimestamp(4, state),
+      filterAfterTimestamp: getVerificationRequestTimestamp(4, state),
       senderFilters: ['openai', 'noreply', 'verify', 'auth', 'duckduckgo', 'forward'],
       subjectFilters: ['verify', 'verification', 'code', '楠岃瘉', 'confirm'],
       targetEmail: state.email,
@@ -4780,7 +4380,7 @@ function getVerificationPollPayload(step, state, overrides = {}) {
   }
 
   return {
-    filterAfterTimestamp: getHotmailVerificationRequestTimestamp(7, state),
+    filterAfterTimestamp: getVerificationRequestTimestamp(7, state),
     senderFilters: ['openai', 'noreply', 'verify', 'auth', 'chatgpt', 'duckduckgo', 'forward'],
     subjectFilters: ['verify', 'verification', 'code', '楠岃瘉', 'confirm', 'login'],
     targetEmail: state.email,
@@ -4825,15 +4425,6 @@ async function requestVerificationCodeResend(step) {
 }
 
 async function pollFreshVerificationCode(step, state, mail, pollOverrides = {}) {
-  if (mail.provider === HOTMAIL_PROVIDER) {
-    const hotmailPollConfig = getHotmailVerificationPollConfig(step);
-    return pollHotmailVerificationCode(step, state, {
-      ...getVerificationPollPayload(step, state),
-      ...hotmailPollConfig,
-      ...pollOverrides,
-    });
-  }
-
   const stateKey = getVerificationCodeStateKey(step);
   const rejectedCodes = new Set();
   if (state[stateKey]) {
@@ -4841,6 +4432,49 @@ async function pollFreshVerificationCode(step, state, mail, pollOverrides = {}) 
   }
   for (const code of (pollOverrides.excludeCodes || [])) {
     if (code) rejectedCodes.add(code);
+  }
+
+  if (mail.provider === MOEMAIL_PROVIDER) {
+    let lastError = null;
+    const filterAfterTimestamp = pollOverrides.filterAfterTimestamp ?? getVerificationPollPayload(step, state).filterAfterTimestamp;
+    const maxRounds = pollOverrides.maxRounds || VERIFICATION_POLL_MAX_ROUNDS;
+
+    for (let round = 1; round <= maxRounds; round += 1) {
+      throwIfStopped();
+      if (round > 1) {
+        await requestVerificationCodeResend(step);
+      }
+
+      try {
+        const result = await pollMoemailVerificationCode(step, state, {
+          ...getVerificationPollPayload(step, state),
+          ...pollOverrides,
+          filterAfterTimestamp,
+          excludeCodes: [...rejectedCodes],
+        });
+
+        if (!result || !result.code) {
+          throw new Error(`步骤 ${step}：邮箱轮询结束，但未获取到验证码。`);
+        }
+
+        if (rejectedCodes.has(result.code)) {
+          throw new Error(`步骤 ${step}：再次收到了相同的${getVerificationCodeLabel(step)}验证码：${result.code}`);
+        }
+
+        return result;
+      } catch (err) {
+        if (isStopError(err)) {
+          throw err;
+        }
+        lastError = err;
+        await addLog(`步骤 ${step}：${err.message}`, 'warn');
+        if (round < maxRounds) {
+          await addLog(`步骤 ${step}：将重新发送验证码后重试（${round + 1}/${maxRounds}）...`, 'warn');
+        }
+      }
+    }
+
+    throw lastError || new Error(`步骤 ${step}：无法获取新的${getVerificationCodeLabel(step)}验证码。`);
   }
 
   let lastError = null;
@@ -4933,18 +4567,14 @@ async function submitVerificationCode(step, code) {
 async function resolveVerificationStep(step, state, mail, options = {}) {
   const stateKey = getVerificationCodeStateKey(step);
   const rejectedCodes = new Set();
-  const hotmailPollConfig = mail.provider === HOTMAIL_PROVIDER
-    ? getHotmailVerificationPollConfig(step)
-    : null;
-  const ignorePersistedLastCode = Boolean(hotmailPollConfig?.ignorePersistedLastCode);
-  if (state[stateKey] && !ignorePersistedLastCode) {
+  if (state[stateKey]) {
     rejectedCodes.add(state[stateKey]);
   }
 
   const nextFilterAfterTimestamp = options.filterAfterTimestamp ?? null;
   const requestFreshCodeFirst = options.requestFreshCodeFirst !== undefined
     ? Boolean(options.requestFreshCodeFirst)
-    : (hotmailPollConfig?.requestFreshCodeFirst ?? false);
+    : false;
   const maxSubmitAttempts = 3;
 
   if (requestFreshCodeFirst) {
@@ -4956,14 +4586,6 @@ async function resolveVerificationStep(step, state, mail, options = {}) {
         throw err;
       }
       await addLog(`步骤 ${step}：首次重新获取验证码失败：${err.message}，将继续使用当前时间窗口轮询。`, 'warn');
-    }
-  }
-
-  if (mail.provider === HOTMAIL_PROVIDER) {
-    const initialDelayMs = Number(options.initialDelayMs ?? hotmailPollConfig.initialDelayMs) || 0;
-    if (initialDelayMs > 0) {
-      await addLog(`步骤 ${step}：等待 ${Math.round(initialDelayMs / 1000)} 秒，让 Hotmail 验证码邮件先到达...`, 'info');
-      await sleepWithStop(initialDelayMs);
     }
   }
 
@@ -5048,7 +4670,7 @@ async function executeStep4(state) {
   }
 
   throwIfStopped();
-  if (mail.provider === HOTMAIL_PROVIDER) {
+  if (!mail.source) {
     await addLog(`步骤 4：正在通过 ${mail.label} 轮询验证码...`);
   } else {
     await addLog(`步骤 4：正在打开${mail.label}...`);
@@ -5074,8 +4696,8 @@ async function executeStep4(state) {
   }
 
   await resolveVerificationStep(4, state, mail, {
-    filterAfterTimestamp: mail.provider === HOTMAIL_PROVIDER ? undefined : stepStartedAt,
-    requestFreshCodeFirst: mail.provider === HOTMAIL_PROVIDER ? false : true,
+    filterAfterTimestamp: mail.source ? stepStartedAt : undefined,
+    requestFreshCodeFirst: Boolean(mail.source),
   });
   return;
 }
@@ -5183,7 +4805,7 @@ async function runStep7Attempt(state) {
   }
 
   throwIfStopped();
-  if (mail.provider === HOTMAIL_PROVIDER) {
+  if (!mail.source) {
     await addLog(`步骤 7：正在通过 ${mail.label} 轮询验证码...`);
   } else {
     await addLog(`步骤 7：正在打开${mail.label}...`);
@@ -5208,8 +4830,8 @@ async function runStep7Attempt(state) {
   }
 
   await resolveVerificationStep(7, state, mail, {
-    filterAfterTimestamp: mail.provider === HOTMAIL_PROVIDER ? undefined : stepStartedAt,
-    requestFreshCodeFirst: mail.provider === HOTMAIL_PROVIDER ? false : true,
+    filterAfterTimestamp: mail.source ? stepStartedAt : undefined,
+    requestFreshCodeFirst: Boolean(mail.source),
   });
 }
 
