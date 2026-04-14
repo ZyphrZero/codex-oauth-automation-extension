@@ -136,9 +136,15 @@
         <span class="data-label">密码</span>
         <input type="password" id="input-sub2api-password" class="data-input" placeholder="请输入 SUB2API 登录密码" />
       </div>
-      <div class="data-row" id="row-sub2api-group" style="display:none;">
+      <div class="data-row data-check-row" id="row-sub2api-group" style="display:none;">
         <span class="data-label">分组</span>
-        <input type="text" id="input-sub2api-group" class="data-input" placeholder="默认 codex" />
+        <div class="sub2api-group-picker">
+          <div class="data-inline sub2api-group-toolbar">
+            <span id="sub2api-group-summary" class="data-value sub2api-group-summary">已选 1 个分组</span>
+            <button id="btn-refresh-sub2api-groups" class="btn btn-outline btn-sm data-inline-btn" type="button">刷新</button>
+          </div>
+          <div id="sub2api-group-list" class="sub2api-group-list"></div>
+        </div>
       </div>
       <div class="data-row">
         <span class="data-label">账户密码</span>
@@ -201,7 +207,12 @@
       </div>
       <div class="data-row" id="row-moemail-domain" style="display:none;">
         <span class="data-label">MoeMail 域名</span>
-        <input type="text" id="input-moemail-domain" class="data-input" placeholder="可选，留空则自动选择首个可用域名" />
+        <div class="data-inline">
+          <select id="select-moemail-domain" class="data-select">
+            <option value="">随机域名</option>
+          </select>
+          <button id="btn-refresh-moemail-domains" class="btn btn-outline btn-sm data-inline-btn" type="button">刷新</button>
+        </div>
       </div>
       <div class="data-row">
         <span class="data-label">注册邮箱</span>

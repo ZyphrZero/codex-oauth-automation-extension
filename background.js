@@ -28,8 +28,10 @@ const HUMAN_STEP_DELAY_MAX = 2200;
 const STEP7_MAIL_POLLING_RECOVERY_MAX_ATTEMPTS = 8;
 const SUB2API_STEP1_RESPONSE_TIMEOUT_MS = 90000;
 const SUB2API_STEP9_RESPONSE_TIMEOUT_MS = 120000;
+const SUB2API_REQUEST_TIMEOUT_MS = 15000;
 const DEFAULT_SUB2API_URL = 'https://sub2api.hisence.fun/admin/accounts';
 const DEFAULT_SUB2API_GROUP_NAME = 'codex';
+const DEFAULT_SUB2API_GROUP_NAMES = [];
 const DEFAULT_SUB2API_REDIRECT_URI = 'http://localhost:1455/auth/callback';
 const AUTO_RUN_ALARM_NAME = 'scheduled-auto-run';
 const AUTO_RUN_DELAY_MIN_MINUTES = 1;
@@ -56,7 +58,7 @@ const PERSISTED_SETTING_DEFAULTS = {
   sub2apiUrl: DEFAULT_SUB2API_URL,
   sub2apiEmail: '',
   sub2apiPassword: '',
-  sub2apiGroupName: DEFAULT_SUB2API_GROUP_NAME,
+  sub2apiGroupNames: DEFAULT_SUB2API_GROUP_NAMES,
   customPassword: '',
   autoRunSkipFailures: false,
   autoRunFallbackThreadIntervalMinutes: 0,
@@ -95,7 +97,7 @@ const DEFAULT_STATE = {
   localhostUrl: null, // 运行时捕获到的 localhost 回调地址，不要手动预填。
   sub2apiSessionId: null, // SUB2API OpenAI Auth 会话 ID。
   sub2apiOAuthState: null, // SUB2API OpenAI Auth state。
-  sub2apiGroupId: null, // SUB2API 目标分组 ID。
+  sub2apiGroupIds: [], // SUB2API 目标分组 ID 列表。
   sub2apiDraftName: null, // SUB2API 本轮预生成的账号名称。
   flowStartTime: null, // 当前流程开始时间。
   tabRegistry: {}, // 程序维护的标签页注册表。
@@ -305,8 +307,8 @@ function normalizePersistentSettingValue(key, value) {
       return String(value || '').trim();
     case 'sub2apiPassword':
       return String(value || '');
-    case 'sub2apiGroupName':
-      return String(value || '').trim();
+    case 'sub2apiGroupNames':
+      return normalizeSub2ApiGroupNames(value);
     case 'customPassword':
       return String(value || '');
     case 'autoRunSkipFailures':
@@ -1007,6 +1009,149 @@ function normalizeSub2ApiUrl(rawUrl) {
   }
   parsed.hash = '';
   return parsed.toString();
+}
+
+function normalizeSub2ApiGroupName(rawValue = '') {
+  return String(rawValue || '').trim();
+}
+
+function normalizeSub2ApiGroupNames(rawValue = []) {
+  const values = Array.isArray(rawValue) ? rawValue : [];
+  const seen = new Set();
+  const names = [];
+
+  for (const value of values) {
+    const normalized = normalizeSub2ApiGroupName(value);
+    if (!normalized) continue;
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    names.push(normalized);
+  }
+
+  return names;
+}
+
+function getSelectedSub2ApiGroupNames(state = {}) {
+  return normalizeSub2ApiGroupNames(state.sub2apiGroupNames);
+}
+
+function normalizeSub2ApiGroupRecords(groups = []) {
+  const seenIds = new Set();
+  const seenNames = new Set();
+  const normalizedGroups = [];
+
+  for (const group of Array.isArray(groups) ? groups : []) {
+    const id = Number(group?.id);
+    const name = normalizeSub2ApiGroupName(group?.name);
+    const platform = String(group?.platform || '').trim().toLowerCase();
+    if (!Number.isFinite(id) || id <= 0 || !name) continue;
+    if (platform && platform !== 'openai') continue;
+
+    const nameKey = name.toLowerCase();
+    if (seenIds.has(id) || seenNames.has(nameKey)) continue;
+    seenIds.add(id);
+    seenNames.add(nameKey);
+    normalizedGroups.push({
+      id,
+      name,
+      platform: platform || 'openai',
+      account_count: Number.isFinite(Number(group?.account_count)) ? Number(group.account_count) : null,
+    });
+  }
+
+  return normalizedGroups;
+}
+
+async function requestSub2ApiJson(rawUrl, path, options = {}) {
+  const sub2apiUrl = normalizeSub2ApiUrl(rawUrl);
+  const origin = new URL(sub2apiUrl).origin;
+  const {
+    method = 'GET',
+    token = '',
+    body = undefined,
+  } = options;
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), SUB2API_REQUEST_TIMEOUT_MS);
+
+  let response;
+  try {
+    response = await fetch(`${origin}${path}`, {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err?.name === 'AbortError') {
+      throw new Error(`SUB2API 请求超时（>${Math.round(SUB2API_REQUEST_TIMEOUT_MS / 1000)} 秒）`);
+    }
+    throw new Error(`SUB2API 请求失败：${err.message}`);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  const text = await response.text();
+  let json = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    json = null;
+  }
+
+  if (json && typeof json === 'object' && 'code' in json) {
+    if (json.code === 0) {
+      return json.data;
+    }
+    throw new Error(json.message || json.detail || `请求失败（${path}）`);
+  }
+
+  if (!response.ok) {
+    throw new Error((json && (json.message || json.detail)) || `请求失败（HTTP ${response.status}）：${path}`);
+  }
+
+  return json;
+}
+
+async function loginSub2Api(state = {}) {
+  const email = String(state.sub2apiEmail || '').trim();
+  const password = String(state.sub2apiPassword || '');
+
+  if (!email) {
+    throw new Error('尚未配置 SUB2API 登录邮箱，请先在侧边栏填写。');
+  }
+  if (!password) {
+    throw new Error('尚未配置 SUB2API 登录密码，请先在侧边栏填写。');
+  }
+
+  const sub2apiUrl = normalizeSub2ApiUrl(state.sub2apiUrl);
+  const origin = new URL(sub2apiUrl).origin;
+  const loginData = await requestSub2ApiJson(sub2apiUrl, '/api/v1/auth/login', {
+    method: 'POST',
+    body: { email, password },
+  });
+
+  if (!String(loginData?.access_token || '').trim()) {
+    throw new Error('SUB2API 登录返回缺少 access_token。');
+  }
+
+  return {
+    origin,
+    token: String(loginData.access_token).trim(),
+  };
+}
+
+async function fetchSub2ApiGroups(state = {}) {
+  const { token } = await loginSub2Api(state);
+  const groups = await requestSub2ApiJson(state.sub2apiUrl, '/api/v1/admin/groups/all?platform=openai', {
+    method: 'GET',
+    token,
+  });
+  return normalizeSub2ApiGroupRecords(groups);
 }
 
 function getPanelMode(state = {}) {
@@ -1899,7 +2044,7 @@ function getDownstreamStateResets(step) {
       oauthUrl: null,
       sub2apiSessionId: null,
       sub2apiOAuthState: null,
-      sub2apiGroupId: null,
+      sub2apiGroupIds: [],
       sub2apiDraftName: null,
       flowStartTime: null,
       password: null,
@@ -2643,6 +2788,25 @@ async function handleMessage(message, sender) {
       return { ok: true, email };
     }
 
+    case 'FETCH_MOEMAIL_DOMAINS': {
+      const state = await getState();
+      const overrides = buildPersistentSettingsPayload(message.payload || {});
+      const domains = await fetchMoemailDomains({ ...state, ...overrides });
+      return { ok: true, domains };
+    }
+
+    case 'FETCH_SUB2API_GROUPS': {
+      const state = await getState();
+      const payload = message.payload || {};
+      const groups = await fetchSub2ApiGroups({
+        ...state,
+        sub2apiUrl: payload.sub2apiUrl,
+        sub2apiEmail: payload.sub2apiEmail,
+        sub2apiPassword: payload.sub2apiPassword,
+      });
+      return { ok: true, groups };
+    }
+
     case 'FETCH_DUCK_EMAIL': {
       clearStopRequest();
       const state = await getState();
@@ -2679,7 +2843,11 @@ async function handleStepData(step, payload) {
       }
       if (payload.sub2apiSessionId !== undefined) updates.sub2apiSessionId = payload.sub2apiSessionId || null;
       if (payload.sub2apiOAuthState !== undefined) updates.sub2apiOAuthState = payload.sub2apiOAuthState || null;
-      if (payload.sub2apiGroupId !== undefined) updates.sub2apiGroupId = payload.sub2apiGroupId || null;
+      if (payload.sub2apiGroupIds !== undefined) {
+        updates.sub2apiGroupIds = Array.isArray(payload.sub2apiGroupIds)
+          ? payload.sub2apiGroupIds.map((groupId) => Number(groupId)).filter((groupId) => Number.isFinite(groupId) && groupId > 0)
+          : [];
+      }
       if (payload.sub2apiDraftName !== undefined) updates.sub2apiDraftName = payload.sub2apiDraftName || null;
       if (Object.keys(updates).length) {
         await setState(updates);
@@ -4208,13 +4376,16 @@ async function executeCpaStep1(state) {
 
 async function executeSub2ApiStep1(state) {
   const sub2apiUrl = normalizeSub2ApiUrl(state.sub2apiUrl);
-  const groupName = (state.sub2apiGroupName || DEFAULT_SUB2API_GROUP_NAME).trim() || DEFAULT_SUB2API_GROUP_NAME;
+  const groupNames = getSelectedSub2ApiGroupNames(state);
 
   if (!state.sub2apiEmail) {
     throw new Error('尚未配置 SUB2API 登录邮箱，请先在侧边栏填写。');
   }
   if (!state.sub2apiPassword) {
     throw new Error('尚未配置 SUB2API 登录密码，请先在侧边栏填写。');
+  }
+  if (!groupNames.length) {
+    throw new Error('尚未选择 SUB2API 分组，请先在侧边栏勾选至少一个分组。');
   }
 
   await addLog('步骤 1：正在打开 SUB2API 后台...');
@@ -4252,7 +4423,7 @@ async function executeSub2ApiStep1(state) {
       sub2apiUrl,
       sub2apiEmail: state.sub2apiEmail,
       sub2apiPassword: state.sub2apiPassword,
-      sub2apiGroupName: groupName,
+      sub2apiGroupNames: groupNames,
     },
   }, {
     responseTimeoutMs: SUB2API_STEP1_RESPONSE_TIMEOUT_MS,
@@ -5430,6 +5601,12 @@ async function executeSub2ApiStep9(state) {
 
   await addLog('步骤 9：正在打开 SUB2API 后台...');
 
+  const selectedGroupNames = getSelectedSub2ApiGroupNames(state);
+  const selectedGroupIds = Array.isArray(state.sub2apiGroupIds) ? state.sub2apiGroupIds : [];
+  if (!selectedGroupNames.length && !selectedGroupIds.length) {
+    throw new Error('尚未选择 SUB2API 分组，请先在侧边栏勾选至少一个分组。');
+  }
+
   let tabId = await getTabId('sub2api-panel');
   const alive = tabId && await isTabAlive('sub2api-panel');
 
@@ -5460,10 +5637,10 @@ async function executeSub2ApiStep9(state) {
       sub2apiUrl,
       sub2apiEmail: state.sub2apiEmail,
       sub2apiPassword: state.sub2apiPassword,
-      sub2apiGroupName: state.sub2apiGroupName,
+      sub2apiGroupNames: selectedGroupNames,
       sub2apiSessionId: state.sub2apiSessionId,
       sub2apiOAuthState: state.sub2apiOAuthState,
-      sub2apiGroupId: state.sub2apiGroupId,
+      sub2apiGroupIds: selectedGroupIds,
       sub2apiDraftName: state.sub2apiDraftName,
     },
   }, {

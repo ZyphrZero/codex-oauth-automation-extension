@@ -63,7 +63,9 @@ const inputSub2ApiEmail = document.getElementById('input-sub2api-email');
 const rowSub2ApiPassword = document.getElementById('row-sub2api-password');
 const inputSub2ApiPassword = document.getElementById('input-sub2api-password');
 const rowSub2ApiGroup = document.getElementById('row-sub2api-group');
-const inputSub2ApiGroup = document.getElementById('input-sub2api-group');
+const sub2ApiGroupList = document.getElementById('sub2api-group-list');
+const sub2ApiGroupSummary = document.getElementById('sub2api-group-summary');
+const btnRefreshSub2ApiGroups = document.getElementById('btn-refresh-sub2api-groups');
 const selectMailProvider = document.getElementById('select-mail-provider');
 const btnMailLogin = document.getElementById('btn-mail-login');
 const rowEmailGenerator = document.getElementById('row-email-generator');
@@ -80,7 +82,8 @@ const inputMoemailBaseUrl = document.getElementById('input-moemail-base-url');
 const rowMoemailApiKey = document.getElementById('row-moemail-api-key');
 const inputMoemailApiKey = document.getElementById('input-moemail-api-key');
 const rowMoemailDomain = document.getElementById('row-moemail-domain');
-const inputMoemailDomain = document.getElementById('input-moemail-domain');
+const selectMoemailDomain = document.getElementById('select-moemail-domain');
+const btnRefreshMoemailDomains = document.getElementById('btn-refresh-moemail-domains');
 const rowCfDomain = document.getElementById('row-cf-domain');
 const selectCfDomain = document.getElementById('select-cf-domain');
 const inputCfDomain = document.getElementById('input-cf-domain');
@@ -103,6 +106,8 @@ const btnAutoStartCancel = document.getElementById('btn-auto-start-cancel');
 const btnAutoStartRestart = document.getElementById('btn-auto-start-restart');
 const btnAutoStartContinue = document.getElementById('btn-auto-start-continue');
 const autoHintText = document.querySelector('.auto-hint');
+const DEFAULT_SUB2API_GROUP_NAME = 'codex';
+const DEFAULT_SUB2API_GROUP_NAMES = [];
 const STEP_DEFAULT_STATUSES = {
   1: 'pending',
   2: 'pending',
@@ -147,6 +152,12 @@ let settingsDirty = false;
 let settingsSaveInFlight = false;
 let settingsAutoSaveTimer = null;
 let cloudflareDomainEditMode = false;
+let sub2ApiAvailableGroups = [];
+let sub2ApiGroupLoadInFlight = false;
+let sub2ApiGroupLoadSequence = 0;
+let moemailAvailableDomains = [];
+let moemailDomainLoadInFlight = false;
+let moemailDomainLoadSequence = 0;
 let modalChoiceResolver = null;
 let currentModalActions = [];
 let modalResultBuilder = null;
@@ -817,6 +828,249 @@ function setDefaultAutoRunButton() {
   btnAutoRun.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> 自动';
 }
 
+function normalizeSub2ApiGroupNameForUi(rawValue = '') {
+  return String(rawValue || '').trim();
+}
+
+function normalizeSub2ApiGroupNamesForUi(rawValue = []) {
+  const values = Array.isArray(rawValue) ? rawValue : [];
+  const seen = new Set();
+  const names = [];
+
+  for (const value of values) {
+    const normalized = normalizeSub2ApiGroupNameForUi(value);
+    if (!normalized) continue;
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    names.push(normalized);
+  }
+
+  return names;
+}
+
+function getSelectedSub2ApiGroupNamesFromState(state = latestState) {
+  return normalizeSub2ApiGroupNamesForUi(state?.sub2apiGroupNames || []);
+}
+
+function normalizeSub2ApiGroupRecords(groups = []) {
+  const seenIds = new Set();
+  const seenNames = new Set();
+  const normalizedGroups = [];
+
+  for (const group of Array.isArray(groups) ? groups : []) {
+    const id = Number(group?.id);
+    const name = normalizeSub2ApiGroupNameForUi(group?.name);
+    const platform = String(group?.platform || '').trim().toLowerCase();
+    if (!Number.isFinite(id) || id <= 0 || !name) continue;
+    if (platform && platform !== 'openai') continue;
+
+    const nameKey = name.toLowerCase();
+    if (seenIds.has(id) || seenNames.has(nameKey)) continue;
+    seenIds.add(id);
+    seenNames.add(nameKey);
+    normalizedGroups.push({
+      id,
+      name,
+      platform: platform || 'openai',
+      accountCount: Number.isFinite(Number(group?.account_count)) ? Number(group.account_count) : null,
+    });
+  }
+
+  return normalizedGroups;
+}
+
+function buildSub2ApiGroupOptionModels(groups = [], selectedNames = []) {
+  const normalizedGroups = normalizeSub2ApiGroupRecords(groups);
+  const normalizedSelectedNames = normalizeSub2ApiGroupNamesForUi(selectedNames);
+  const effectiveSelectedNames = normalizedSelectedNames;
+  const options = [];
+  const seenNames = new Set();
+
+  normalizedGroups.forEach((group) => {
+    options.push(group);
+    seenNames.add(group.name.toLowerCase());
+  });
+
+  effectiveSelectedNames.forEach((name) => {
+    const key = name.toLowerCase();
+    if (seenNames.has(key)) return;
+    seenNames.add(key);
+    options.push({
+      id: null,
+      name,
+      platform: 'openai',
+      accountCount: null,
+    });
+  });
+
+  return {
+    options,
+    selectedNames: effectiveSelectedNames,
+  };
+}
+
+function getSelectedSub2ApiGroupNames() {
+  if (!sub2ApiGroupList) {
+    return getSelectedSub2ApiGroupNamesFromState();
+  }
+
+  const checkedNames = Array.from(
+    sub2ApiGroupList.querySelectorAll('input[type="checkbox"]:checked')
+  ).map((input) => input.value);
+  return normalizeSub2ApiGroupNamesForUi(checkedNames);
+}
+
+function updateSub2ApiGroupSummary(selectedNames = getSelectedSub2ApiGroupNames()) {
+  if (!sub2ApiGroupSummary) {
+    return;
+  }
+
+  const normalized = normalizeSub2ApiGroupNamesForUi(selectedNames);
+  sub2ApiGroupSummary.textContent = `已选 ${normalized.length} 个分组`;
+}
+
+function renderSub2ApiGroupOptions(groups = sub2ApiAvailableGroups, selectedNames = getSelectedSub2ApiGroupNamesFromState()) {
+  if (!sub2ApiGroupList) {
+    return;
+  }
+
+  sub2ApiAvailableGroups = normalizeSub2ApiGroupRecords(groups);
+  const { options, selectedNames: effectiveSelectedNames } = buildSub2ApiGroupOptionModels(
+    sub2ApiAvailableGroups,
+    selectedNames
+  );
+  const selectedSet = new Set(effectiveSelectedNames.map((name) => name.toLowerCase()));
+  sub2ApiGroupList.innerHTML = '';
+
+  if (!options.length) {
+    const empty = document.createElement('div');
+    empty.className = 'sub2api-group-empty';
+    empty.textContent = '请先填写 SUB2API 地址、账号和密码，然后点击刷新。';
+    sub2ApiGroupList.appendChild(empty);
+    updateSub2ApiGroupSummary([]);
+    updateSub2ApiGroupActionState();
+    return;
+  }
+
+  options.forEach((group) => {
+    const option = document.createElement('label');
+    option.className = 'sub2api-group-option';
+
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.value = group.name;
+    checkbox.checked = selectedSet.has(group.name.toLowerCase());
+    checkbox.disabled = sub2ApiGroupLoadInFlight;
+
+    const name = document.createElement('span');
+    name.className = 'sub2api-group-name';
+    name.textContent = group.name;
+
+    option.appendChild(checkbox);
+    option.appendChild(name);
+
+    if (Number.isFinite(group.accountCount) && group.accountCount !== null) {
+      const meta = document.createElement('span');
+      meta.className = 'sub2api-group-meta';
+      meta.textContent = `${group.accountCount}`;
+      option.appendChild(meta);
+    }
+
+    sub2ApiGroupList.appendChild(option);
+  });
+
+  updateSub2ApiGroupSummary(effectiveSelectedNames);
+  updateSub2ApiGroupActionState();
+}
+
+function updateSub2ApiGroupActionState() {
+  if (btnRefreshSub2ApiGroups) {
+    btnRefreshSub2ApiGroups.disabled = sub2ApiGroupLoadInFlight || selectPanelMode.value !== 'sub2api';
+    btnRefreshSub2ApiGroups.textContent = sub2ApiGroupLoadInFlight ? '加载中' : '刷新';
+  }
+
+  if (!sub2ApiGroupList) {
+    return;
+  }
+
+  sub2ApiGroupList.querySelectorAll('input[type="checkbox"]').forEach((input) => {
+    input.disabled = sub2ApiGroupLoadInFlight;
+  });
+}
+
+async function refreshSub2ApiGroupOptions(options = {}) {
+  const {
+    silent = false,
+    selectedNames = undefined,
+  } = options;
+
+  const nextSelectedNames = selectedNames !== undefined
+    ? normalizeSub2ApiGroupNamesForUi(selectedNames)
+    : getSelectedSub2ApiGroupNames();
+
+  if (selectPanelMode.value !== 'sub2api') {
+    renderSub2ApiGroupOptions(sub2ApiAvailableGroups, nextSelectedNames);
+    return [];
+  }
+
+  const sub2apiUrl = inputSub2ApiUrl.value.trim();
+  const sub2apiEmail = inputSub2ApiEmail.value.trim();
+  const sub2apiPassword = inputSub2ApiPassword.value;
+
+  if (!sub2apiUrl || !sub2apiEmail || !sub2apiPassword) {
+    renderSub2ApiGroupOptions(sub2ApiAvailableGroups, nextSelectedNames);
+    if (!silent) {
+      showToast('请先填写 SUB2API 地址、账号和密码。', 'warn');
+    }
+    return [];
+  }
+
+  const requestId = ++sub2ApiGroupLoadSequence;
+  sub2ApiGroupLoadInFlight = true;
+  updateSub2ApiGroupActionState();
+
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: 'FETCH_SUB2API_GROUPS',
+      source: 'sidepanel',
+      payload: {
+        sub2apiUrl,
+        sub2apiEmail,
+        sub2apiPassword,
+      },
+    });
+
+    if (response?.error) {
+      throw new Error(response.error);
+    }
+
+    const groups = normalizeSub2ApiGroupRecords(response?.groups || []);
+    if (requestId !== sub2ApiGroupLoadSequence) {
+      return sub2ApiAvailableGroups;
+    }
+
+    renderSub2ApiGroupOptions(groups, nextSelectedNames);
+    if (!silent) {
+      showToast(`已加载 ${groups.length} 个 SUB2API 分组`, 'success', 1800);
+    }
+    return groups;
+  } catch (err) {
+    if (requestId === sub2ApiGroupLoadSequence) {
+      renderSub2ApiGroupOptions(sub2ApiAvailableGroups, nextSelectedNames);
+    }
+    if (!silent) {
+      showToast(`加载 SUB2API 分组失败：${err.message}`, 'error');
+    }
+    throw err;
+  } finally {
+    if (requestId === sub2ApiGroupLoadSequence) {
+      sub2ApiGroupLoadInFlight = false;
+      updateSub2ApiGroupActionState();
+    }
+  }
+}
+
 function normalizeCloudflareDomainValue(value = '') {
   let normalized = String(value || '').trim().toLowerCase();
   if (!normalized) return '';
@@ -839,6 +1093,163 @@ function normalizeCloudflareDomains(values = []) {
     domains.push(normalized);
   }
   return domains;
+}
+
+function normalizeMoemailDomainValueForUi(rawValue = '') {
+  if (typeof window !== 'undefined' && typeof window.MoemailUtils?.normalizeMoemailDomain === 'function') {
+    return window.MoemailUtils.normalizeMoemailDomain(rawValue);
+  }
+
+  let value = String(rawValue || '').trim().toLowerCase();
+  if (!value) return '';
+  value = value.replace(/^@+/, '');
+  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(value)) {
+    return '';
+  }
+  return value;
+}
+
+function normalizeMoemailDomainList(values = []) {
+  const seen = new Set();
+  const domains = [];
+  for (const value of Array.isArray(values) ? values : []) {
+    const normalized = normalizeMoemailDomainValueForUi(value);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    domains.push(normalized);
+  }
+  return domains;
+}
+
+function buildMoemailDomainOptionModels(domains = [], preferredDomain = '') {
+  const normalizedDomains = normalizeMoemailDomainList(domains);
+  const normalizedPreferred = normalizeMoemailDomainValueForUi(preferredDomain);
+  const options = [{ value: '', label: '随机域名' }];
+
+  normalizedDomains.forEach((domain) => {
+    options.push({ value: domain, label: domain });
+  });
+
+  if (normalizedPreferred && !normalizedDomains.includes(normalizedPreferred)) {
+    options.push({
+      value: normalizedPreferred,
+      label: `${normalizedPreferred}（已保存）`,
+    });
+  }
+
+  return {
+    options,
+    selectedValue: normalizedPreferred || '',
+  };
+}
+
+function getSelectedMoemailDomainValue() {
+  return normalizeMoemailDomainValueForUi(selectMoemailDomain?.value || '');
+}
+
+function renderMoemailDomainOptions(domains = moemailAvailableDomains, preferredDomain = '') {
+  if (!selectMoemailDomain) {
+    return;
+  }
+
+  moemailAvailableDomains = normalizeMoemailDomainList(domains);
+  const { options, selectedValue } = buildMoemailDomainOptionModels(moemailAvailableDomains, preferredDomain);
+  selectMoemailDomain.innerHTML = '';
+
+  options.forEach((model) => {
+    const option = document.createElement('option');
+    option.value = model.value;
+    option.textContent = model.label;
+    selectMoemailDomain.appendChild(option);
+  });
+
+  selectMoemailDomain.value = options.some((model) => model.value === selectedValue)
+    ? selectedValue
+    : '';
+}
+
+function updateMoemailDomainActionState() {
+  if (!selectMoemailDomain) {
+    return;
+  }
+
+  selectMoemailDomain.disabled = moemailDomainLoadInFlight;
+  if (btnRefreshMoemailDomains) {
+    btnRefreshMoemailDomains.disabled = moemailDomainLoadInFlight || selectMailProvider.value !== 'moemail';
+    btnRefreshMoemailDomains.textContent = moemailDomainLoadInFlight ? '加载中' : '刷新';
+  }
+}
+
+async function refreshMoemailDomainOptions(options = {}) {
+  const {
+    silent = false,
+    preferredDomain = undefined,
+  } = options;
+
+  const nextPreferredDomain = preferredDomain !== undefined
+    ? preferredDomain
+    : (getSelectedMoemailDomainValue() || latestState?.moemailDomain || '');
+
+  if (selectMailProvider.value !== 'moemail') {
+    renderMoemailDomainOptions([], nextPreferredDomain);
+    updateMoemailDomainActionState();
+    return [];
+  }
+
+  const apiKey = inputMoemailApiKey.value.trim();
+  if (!apiKey) {
+    moemailAvailableDomains = [];
+    renderMoemailDomainOptions([], nextPreferredDomain);
+    updateMoemailDomainActionState();
+    if (!silent) {
+      showToast('请先填写 MoeMail API Key。', 'warn');
+    }
+    return [];
+  }
+
+  const requestId = ++moemailDomainLoadSequence;
+  moemailDomainLoadInFlight = true;
+  updateMoemailDomainActionState();
+
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: 'FETCH_MOEMAIL_DOMAINS',
+      source: 'sidepanel',
+      payload: {
+        moemailApiBaseUrl: inputMoemailBaseUrl.value.trim(),
+        moemailApiKey: apiKey,
+      },
+    });
+
+    if (response?.error) {
+      throw new Error(response.error);
+    }
+    const domains = normalizeMoemailDomainList(response?.domains || []);
+
+    if (requestId !== moemailDomainLoadSequence) {
+      return moemailAvailableDomains;
+    }
+
+    renderMoemailDomainOptions(domains, nextPreferredDomain);
+    if (!silent) {
+      showToast(`已加载 ${domains.length} 个 MoeMail 域名`, 'success', 1800);
+    }
+    return domains;
+  } catch (err) {
+    if (requestId === moemailDomainLoadSequence) {
+      moemailAvailableDomains = [];
+      renderMoemailDomainOptions([], nextPreferredDomain);
+    }
+    if (!silent) {
+      showToast(`加载 MoeMail 域名失败：${err.message}`, 'error');
+    }
+    throw err;
+  } finally {
+    if (requestId === moemailDomainLoadSequence) {
+      moemailDomainLoadInFlight = false;
+      updateMoemailDomainActionState();
+    }
+  }
 }
 
 function getCloudflareDomainsFromState() {
@@ -905,7 +1316,7 @@ function collectSettingsPayload() {
     sub2apiUrl: inputSub2ApiUrl.value.trim(),
     sub2apiEmail: inputSub2ApiEmail.value.trim(),
     sub2apiPassword: inputSub2ApiPassword.value,
-    sub2apiGroupName: inputSub2ApiGroup.value.trim(),
+    sub2apiGroupNames: getSelectedSub2ApiGroupNames(),
     customPassword: inputPassword.value,
     mailProvider: selectMailProvider.value,
     emailGenerator: selectEmailGenerator.value,
@@ -914,7 +1325,7 @@ function collectSettingsPayload() {
     inbucketMailbox: inputInbucketMailbox.value.trim(),
     moemailApiBaseUrl: inputMoemailBaseUrl.value.trim(),
     moemailApiKey: inputMoemailApiKey.value.trim(),
-    moemailDomain: inputMoemailDomain.value.trim(),
+    moemailDomain: getSelectedMoemailDomainValue(),
     cloudflareDomain: selectedCloudflareDomain,
     cloudflareDomains: domains,
     autoRunSkipFailures: inputAutoSkipFailures.checked,
@@ -992,10 +1403,36 @@ function markSettingsDirty(isDirty = true) {
   updateSaveButtonState();
 }
 
+function getSaveButtonPresentation(isDirty = settingsDirty, saveInFlight = settingsSaveInFlight) {
+  if (saveInFlight) {
+    return {
+      disabled: true,
+      label: '保存中',
+      title: '正在保存配置',
+    };
+  }
+
+  if (isDirty) {
+    return {
+      disabled: false,
+      label: '保存',
+      title: '保存当前配置',
+    };
+  }
+
+  return {
+    disabled: false,
+    label: '保存',
+    title: '当前配置已保存',
+  };
+}
+
 function updateSaveButtonState() {
-  btnSaveSettings.disabled = settingsSaveInFlight || !settingsDirty;
+  const presentation = getSaveButtonPresentation(settingsDirty, settingsSaveInFlight);
+  btnSaveSettings.disabled = presentation.disabled;
   updateConfigMenuControls();
-  btnSaveSettings.textContent = settingsSaveInFlight ? '保存中' : '保存';
+  btnSaveSettings.textContent = presentation.label;
+  btnSaveSettings.title = presentation.title;
 }
 
 function scheduleSettingsAutoSave() {
@@ -1165,7 +1602,7 @@ function applySettingsState(state) {
   inputSub2ApiUrl.value = state?.sub2apiUrl || '';
   inputSub2ApiEmail.value = state?.sub2apiEmail || '';
   inputSub2ApiPassword.value = state?.sub2apiPassword || '';
-  inputSub2ApiGroup.value = state?.sub2apiGroupName || '';
+  renderSub2ApiGroupOptions(sub2ApiAvailableGroups, state?.sub2apiGroupNames || DEFAULT_SUB2API_GROUP_NAMES);
   const restoredMailProvider = isCustomMailProvider(state?.mailProvider)
     || ['moemail', '163', '163-vip', 'qq', 'inbucket', '2925'].includes(String(state?.mailProvider || '').trim())
     ? String(state?.mailProvider || '163').trim()
@@ -1180,7 +1617,7 @@ function applySettingsState(state) {
   inputInbucketMailbox.value = state?.inbucketMailbox || '';
   inputMoemailBaseUrl.value = state?.moemailApiBaseUrl || DEFAULT_MOEMAIL_API_BASE_URL;
   inputMoemailApiKey.value = state?.moemailApiKey || '';
-  inputMoemailDomain.value = state?.moemailDomain || '';
+  renderMoemailDomainOptions(moemailAvailableDomains, state?.moemailDomain || '');
   renderCloudflareDomainOptions(state?.cloudflareDomain || '');
   setCloudflareDomainEditMode(false, { clearInput: true });
   inputAutoSkipFailures.checked = Boolean(state?.autoRunSkipFailures);
@@ -1205,6 +1642,18 @@ async function restoreState() {
   try {
     const state = await chrome.runtime.sendMessage({ type: 'GET_STATE', source: 'sidepanel' });
     applySettingsState(state);
+    if (String(state?.panelMode || '').trim() === 'sub2api') {
+      refreshSub2ApiGroupOptions({
+        silent: true,
+        selectedNames: state?.sub2apiGroupNames || DEFAULT_SUB2API_GROUP_NAMES,
+      }).catch(() => { });
+    }
+    if (String(state?.mailProvider || '').trim() === 'moemail') {
+      refreshMoemailDomainOptions({
+        silent: true,
+        preferredDomain: state?.moemailDomain || '',
+      }).catch(() => { });
+    }
 
     if (state.oauthUrl) {
       displayOauthUrl.textContent = state.oauthUrl;
@@ -1585,6 +2034,7 @@ function updateMailProviderUI() {
   if (rowMoemailDomain) {
     rowMoemailDomain.style.display = useMoemail ? '' : 'none';
   }
+  updateMoemailDomainActionState();
   const useCloudflare = selectEmailGenerator.value === 'cloudflare';
   const showCloudflareDomain = useEmailGenerator && useCloudflare;
   if (rowEmailGenerator) {
@@ -1666,6 +2116,7 @@ function updatePanelModeUI() {
   if (step9Btn) {
     step9Btn.textContent = useSub2Api ? 'SUB2API 回调验证' : 'CPA 回调验证';
   }
+  updateSub2ApiGroupActionState();
 }
 
 // ============================================================
@@ -2434,7 +2885,7 @@ inputVpsPassword.addEventListener('blur', () => {
   saveSettings({ silent: true }).catch(() => { });
 });
 
-[inputMoemailBaseUrl, inputMoemailApiKey, inputMoemailDomain].forEach((input) => {
+[inputMoemailBaseUrl, inputMoemailApiKey].forEach((input) => {
   input?.addEventListener('input', () => {
     markSettingsDirty(true);
     scheduleSettingsAutoSave();
@@ -2442,6 +2893,23 @@ inputVpsPassword.addEventListener('blur', () => {
   input?.addEventListener('blur', () => {
     saveSettings({ silent: true }).catch(() => { });
   });
+});
+
+inputMoemailBaseUrl?.addEventListener('blur', () => {
+  refreshMoemailDomainOptions({ silent: true }).catch(() => { });
+});
+
+inputMoemailApiKey?.addEventListener('blur', () => {
+  refreshMoemailDomainOptions({ silent: true }).catch(() => { });
+});
+
+selectMoemailDomain?.addEventListener('change', () => {
+  markSettingsDirty(true);
+  saveSettings({ silent: true }).catch(() => { });
+});
+
+btnRefreshMoemailDomains?.addEventListener('click', () => {
+  refreshMoemailDomainOptions({ silent: false }).catch(() => { });
 });
 
 inputPassword.addEventListener('input', () => {
@@ -2457,6 +2925,9 @@ selectMailProvider.addEventListener('change', async () => {
   const previousProvider = latestState?.mailProvider || '';
   const nextProvider = selectMailProvider.value;
   updateMailProviderUI();
+  if (nextProvider === 'moemail') {
+    refreshMoemailDomainOptions({ silent: true }).catch(() => { });
+  }
   const leavingMoemail = previousProvider === 'moemail'
     && nextProvider !== 'moemail'
     && isCurrentEmailManagedByMoemail();
@@ -2479,6 +2950,9 @@ selectEmailGenerator.addEventListener('change', () => {
 
 selectPanelMode.addEventListener('change', () => {
   updatePanelModeUI();
+  if (selectPanelMode.value === 'sub2api') {
+    refreshSub2ApiGroupOptions({ silent: true }).catch(() => { });
+  }
   markSettingsDirty(true);
   saveSettings({ silent: true }).catch(() => { });
 });
@@ -2525,6 +2999,7 @@ inputSub2ApiUrl.addEventListener('input', () => {
 });
 inputSub2ApiUrl.addEventListener('blur', () => {
   saveSettings({ silent: true }).catch(() => { });
+  refreshSub2ApiGroupOptions({ silent: true }).catch(() => { });
 });
 
 inputSub2ApiEmail.addEventListener('input', () => {
@@ -2533,6 +3008,7 @@ inputSub2ApiEmail.addEventListener('input', () => {
 });
 inputSub2ApiEmail.addEventListener('blur', () => {
   saveSettings({ silent: true }).catch(() => { });
+  refreshSub2ApiGroupOptions({ silent: true }).catch(() => { });
 });
 
 inputSub2ApiPassword.addEventListener('input', () => {
@@ -2541,14 +3017,21 @@ inputSub2ApiPassword.addEventListener('input', () => {
 });
 inputSub2ApiPassword.addEventListener('blur', () => {
   saveSettings({ silent: true }).catch(() => { });
+  refreshSub2ApiGroupOptions({ silent: true }).catch(() => { });
 });
 
-inputSub2ApiGroup.addEventListener('input', () => {
+sub2ApiGroupList?.addEventListener('change', (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLInputElement) || target.type !== 'checkbox') {
+    return;
+  }
+  updateSub2ApiGroupSummary(getSelectedSub2ApiGroupNames());
   markSettingsDirty(true);
-  scheduleSettingsAutoSave();
-});
-inputSub2ApiGroup.addEventListener('blur', () => {
   saveSettings({ silent: true }).catch(() => { });
+});
+
+btnRefreshSub2ApiGroups?.addEventListener('click', () => {
+  refreshSub2ApiGroupOptions({ silent: false }).catch(() => { });
 });
 
 inputEmailPrefix.addEventListener('input', () => {
