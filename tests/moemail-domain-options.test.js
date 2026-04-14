@@ -57,11 +57,13 @@ const api = new Function(`
 ${extractFunction('normalizeMoemailDomainValueForUi')}
 ${extractFunction('normalizeMoemailDomainList')}
 ${extractFunction('buildMoemailDomainOptionModels')}
+${extractFunction('resolveMoemailDomainRefreshPreferred')}
 
 return {
   normalizeMoemailDomainValueForUi,
   normalizeMoemailDomainList,
   buildMoemailDomainOptionModels,
+  resolveMoemailDomainRefreshPreferred,
 };
 `)();
 
@@ -97,5 +99,19 @@ test('normalizeMoemailDomainList de-duplicates invalid and repeated domains', ()
   assert.deepEqual(
     api.normalizeMoemailDomainList(['ALPHA.TEST', 'bad domain', 'alpha.test', '@beta.test']),
     ['alpha.test', 'beta.test']
+  );
+});
+
+test('resolveMoemailDomainRefreshPreferred preserves an explicit random-domain selection', () => {
+  assert.equal(
+    api.resolveMoemailDomainRefreshPreferred(undefined, '', 'alpha.test'),
+    '',
+  );
+});
+
+test('resolveMoemailDomainRefreshPreferred falls back to the saved domain only when no current selection exists', () => {
+  assert.equal(
+    api.resolveMoemailDomainRefreshPreferred(undefined, undefined, 'alpha.test'),
+    'alpha.test',
   );
 });

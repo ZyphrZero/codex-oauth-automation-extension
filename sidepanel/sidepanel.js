@@ -1147,6 +1147,18 @@ function getSelectedMoemailDomainValue() {
   return normalizeMoemailDomainValueForUi(selectMoemailDomain?.value || '');
 }
 
+function resolveMoemailDomainRefreshPreferred(preferredDomain, selectedDomain, savedDomain) {
+  if (preferredDomain !== undefined) {
+    return normalizeMoemailDomainValueForUi(preferredDomain);
+  }
+
+  if (selectedDomain !== undefined) {
+    return normalizeMoemailDomainValueForUi(selectedDomain);
+  }
+
+  return normalizeMoemailDomainValueForUi(savedDomain || '');
+}
+
 function renderMoemailDomainOptions(domains = moemailAvailableDomains, preferredDomain = '') {
   if (!selectMoemailDomain) {
     return;
@@ -1186,9 +1198,11 @@ async function refreshMoemailDomainOptions(options = {}) {
     preferredDomain = undefined,
   } = options;
 
-  const nextPreferredDomain = preferredDomain !== undefined
-    ? preferredDomain
-    : (getSelectedMoemailDomainValue() || latestState?.moemailDomain || '');
+  const nextPreferredDomain = resolveMoemailDomainRefreshPreferred(
+    preferredDomain,
+    selectMoemailDomain ? selectMoemailDomain.value : undefined,
+    latestState?.moemailDomain,
+  );
 
   if (selectMailProvider.value !== 'moemail') {
     renderMoemailDomainOptions([], nextPreferredDomain);

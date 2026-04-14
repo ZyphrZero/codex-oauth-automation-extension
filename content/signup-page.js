@@ -3,6 +3,9 @@
 
 console.log('[MultiPage:signup-page] Content script loaded on', location.href);
 
+const STEP5_CREATE_ACCOUNT_ERROR_EVENT = 'multipage:step5-create-account-error';
+let lastStep5CreateAccountError = '';
+
 // Listen for commands from Background
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (
@@ -66,6 +69,66 @@ async function handleCommand(message) {
       return await step8_triggerContinue(message.payload);
   }
 }
+
+function safeJsonParse(text) {
+  if (typeof text !== 'string' || !text.trim()) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function formatStep5CreateAccountError(detail) {
+  const normalizedDetail = detail && typeof detail === 'object' ? detail : {};
+  const payload = safeJsonParse(normalizedDetail.bodyText) || {};
+  const status = Number(normalizedDetail.status) || 0;
+  const code = normalizeInlineText(payload.code || normalizedDetail.code || '');
+  const type = normalizeInlineText(payload.type || normalizedDetail.type || '');
+  const message = normalizeInlineText(payload.message || normalizedDetail.message || '');
+  const fallbackText = normalizeInlineText(normalizedDetail.bodyText || '');
+
+  if (!status && !code && !type && !message && !fallbackText) {
+    return '';
+  }
+
+  const primaryLabel = code || type || (status ? `HTTP ${status}` : '未知错误');
+  const statusSuffix = status && code ? `（HTTP ${status}）` : '';
+  const detailText = message || (!payload.message ? fallbackText : '');
+
+  return detailText
+    ? `create_account 接口返回 ${primaryLabel}${statusSuffix}：${detailText}`
+    : `create_account 接口返回 ${primaryLabel}${statusSuffix}`;
+}
+
+function clearStep5CreateAccountError() {
+  lastStep5CreateAccountError = '';
+}
+
+function getStep5CreateAccountErrorText() {
+  return lastStep5CreateAccountError;
+}
+
+function getStep5SubmitErrorText() {
+  return getStep5CreateAccountErrorText() || getStep5ErrorText();
+}
+
+function handleStep5CreateAccountErrorEvent(event) {
+  const detailText = typeof event?.detail === 'string' ? event.detail : '';
+  const detail = safeJsonParse(detailText) || {};
+  const errorText = formatStep5CreateAccountError(detail);
+  if (!errorText) {
+    return;
+  }
+
+  lastStep5CreateAccountError = errorText;
+  console.warn('[MultiPage:signup-page] Captured Step 5 API error:', errorText);
+}
+
+window.addEventListener(STEP5_CREATE_ACCOUNT_ERROR_EVENT, handleStep5CreateAccountErrorEvent, true);
 
 const VERIFICATION_CODE_INPUT_SELECTOR = [
   'input[name="code"]',
@@ -623,7 +686,7 @@ async function waitForStep5SubmitOutcome(timeout = 15000) {
   while (Date.now() - start < timeout) {
     throwIfStopped();
 
-    const errorText = getStep5ErrorText();
+    const errorText = getStep5SubmitErrorText();
     if (errorText) {
       return { invalidProfile: true, errorText };
     }
@@ -639,7 +702,7 @@ async function waitForStep5SubmitOutcome(timeout = 15000) {
     await sleep(150);
   }
 
-  const errorText = getStep5ErrorText();
+  const errorText = getStep5SubmitErrorText();
   if (errorText) {
     return { invalidProfile: true, errorText };
   }
@@ -1402,6 +1465,7 @@ async function step5_fillNameBirthday(payload) {
 
   // Click "完成帐户创建" button
   await sleep(500);
+  clearStep5CreateAccountError();
   const completeBtn = document.querySelector('button[type="submit"]')
     || await waitForElementByText('button', /完成|create|continue|finish|done|agree/i, 5000).catch(() => null);
   if (!completeBtn) {

@@ -7,6 +7,7 @@
     "sidePanel",
     "alarms",
     "tabs",
+    "tabGroups",
     "webNavigation",
     "debugger",
     "storage",
@@ -23,6 +24,18 @@
     "default_path": "sidepanel/sidepanel.html"
   },
   "content_scripts": [
+    {
+      "matches": [
+        "https://auth0.openai.com/*",
+        "https://auth.openai.com/*",
+        "https://accounts.openai.com/*"
+      ],
+      "js": [
+        "content/signup-page-network-hook.js"
+      ],
+      "world": "MAIN",
+      "run_at": "document_start"
+    },
     {
       "matches": [
         "https://auth0.openai.com/*",

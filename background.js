@@ -100,6 +100,8 @@ const DEFAULT_STATE = {
   sub2apiGroupIds: [], // SUB2API 目标分组 ID 列表。
   sub2apiDraftName: null, // SUB2API 本轮预生成的账号名称。
   flowStartTime: null, // 当前流程开始时间。
+  runTabGroupId: null, // 当前运行绑定的浏览器标签组 ID。
+  runTabGroupWindowId: null, // 当前运行标签组所属窗口 ID。
   tabRegistry: {}, // 程序维护的标签页注册表。
   sourceLastUrls: {}, // 各来源页面最近一次打开的地址记录。
   logs: [], // 侧边栏展示的运行日志。
@@ -711,13 +713,36 @@ async function findMoemailEmailByAddress(address, state = null) {
   return null;
 }
 
+function pickMoemailGenerationDomain(preferredDomain = '', domains = []) {
+  const normalizedPreferred = normalizeMoemailDomain(preferredDomain);
+  if (normalizedPreferred) {
+    return normalizedPreferred;
+  }
+
+  const normalizedDomains = [];
+  const seen = new Set();
+  for (const rawDomain of Array.isArray(domains) ? domains : []) {
+    const normalized = normalizeMoemailDomain(rawDomain);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    normalizedDomains.push(normalized);
+  }
+
+  if (!normalizedDomains.length) {
+    return '';
+  }
+
+  const randomIndex = Math.floor(Math.random() * normalizedDomains.length);
+  return normalizedDomains[Math.max(0, Math.min(normalizedDomains.length - 1, randomIndex))] || '';
+}
+
 async function createMoemailEmail(state = null, options = {}) {
   const latestState = state || await getState();
   const settings = getMoemailSettings(latestState);
-  let domain = normalizeMoemailDomain(options.domain || settings.domain);
+  let domain = pickMoemailGenerationDomain(options.domain || settings.domain, []);
   if (!domain) {
     const domains = await fetchMoemailDomains(latestState);
-    domain = domains[0] || '';
+    domain = pickMoemailGenerationDomain('', domains);
   }
   if (!domain) {
     throw new Error('MoeMail 没有可用域名，无法创建邮箱。');
@@ -964,11 +989,117 @@ async function getTabRegistry() {
   return state.tabRegistry || {};
 }
 
+function normalizeRunTabGroupId(value) {
+  const numeric = Number(value);
+  return Number.isInteger(numeric) && numeric >= 0 ? numeric : null;
+}
+
+function normalizeRunTabGroupWindowId(value) {
+  const numeric = Number(value);
+  return Number.isInteger(numeric) && numeric >= 0 ? numeric : null;
+}
+
+function getRunTabGroupId(state = {}) {
+  return normalizeRunTabGroupId(state.runTabGroupId);
+}
+
+function doesTabBelongToRunGroup(tab, state = {}) {
+  const runTabGroupId = getRunTabGroupId(state);
+  if (runTabGroupId === null) {
+    return false;
+  }
+  return Number(tab?.groupId) === runTabGroupId;
+}
+
+function filterTabsForCurrentRun(tabs = [], state = {}) {
+  return (Array.isArray(tabs) ? tabs : []).filter((tab) => doesTabBelongToRunGroup(tab, state));
+}
+
+function isSenderTabInCurrentRunGroup(sender = {}, state = {}) {
+  return doesTabBelongToRunGroup(sender?.tab, state);
+}
+
 async function registerTab(source, tabId) {
   const registry = await getTabRegistry();
   registry[source] = { tabId, ready: true };
   await setState({ tabRegistry: registry });
   console.log(LOG_PREFIX, `Tab registered: ${source} -> ${tabId}`);
+}
+
+async function collectTrackedTabIdsForRunWindow(windowId, preferredTabId = null) {
+  const normalizedWindowId = normalizeRunTabGroupWindowId(windowId);
+  const registry = await getTabRegistry();
+  const candidateIds = new Set();
+
+  if (Number.isInteger(preferredTabId)) {
+    candidateIds.add(preferredTabId);
+  }
+
+  for (const entry of Object.values(registry)) {
+    const tabId = Number(entry?.tabId);
+    if (!Number.isInteger(tabId) || candidateIds.has(tabId)) continue;
+
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      if (normalizeRunTabGroupWindowId(tab.windowId) === normalizedWindowId) {
+        candidateIds.add(tabId);
+      }
+    } catch { }
+  }
+
+  return [...candidateIds];
+}
+
+async function ensureRunTabGroupForTab(tabId) {
+  if (!Number.isInteger(tabId)) {
+    return null;
+  }
+
+  const tab = await chrome.tabs.get(tabId);
+  const state = await getState();
+  const runTabGroupId = getRunTabGroupId(state);
+  const runWindowId = normalizeRunTabGroupWindowId(state.runTabGroupWindowId);
+
+  if (runTabGroupId !== null && tab.groupId === runTabGroupId) {
+    if (runWindowId !== normalizeRunTabGroupWindowId(tab.windowId)) {
+      await setState({ runTabGroupWindowId: normalizeRunTabGroupWindowId(tab.windowId) });
+    }
+    return runTabGroupId;
+  }
+
+  if (runTabGroupId !== null) {
+    try {
+      await chrome.tabs.group({ tabIds: [tabId], groupId: runTabGroupId });
+      if (runWindowId !== normalizeRunTabGroupWindowId(tab.windowId)) {
+        await setState({ runTabGroupWindowId: normalizeRunTabGroupWindowId(tab.windowId) });
+      }
+      return runTabGroupId;
+    } catch (err) {
+      console.warn(
+        LOG_PREFIX,
+        `Failed to reattach tab ${tabId} to run group ${runTabGroupId}: ${err?.message || err}`
+      );
+    }
+  }
+
+  const tabIds = await collectTrackedTabIdsForRunWindow(tab.windowId, tabId);
+  if (!tabIds.length) {
+    return null;
+  }
+
+  const groupOptions = { tabIds };
+  const normalizedWindowId = normalizeRunTabGroupWindowId(tab.windowId);
+  if (normalizedWindowId !== null) {
+    groupOptions.createProperties = { windowId: normalizedWindowId };
+  }
+
+  const groupId = await chrome.tabs.group(groupOptions);
+  await setState({
+    runTabGroupId: groupId,
+    runTabGroupWindowId: normalizedWindowId,
+  });
+  console.log(LOG_PREFIX, `Created run tab group ${groupId} for tab ${tabId}`);
+  return groupId;
 }
 
 async function isTabAlive(source) {
@@ -1253,7 +1384,9 @@ async function closeConflictingTabsForSource(source, currentUrl, options = {}) {
 
   if (!referenceUrls.length) return;
 
-  const tabs = await chrome.tabs.query({});
+  const tabs = filterTabsForCurrentRun(await chrome.tabs.query({}), state);
+  if (!tabs.length) return;
+
   const matchedIds = tabs
     .filter((tab) => Number.isInteger(tab.id) && !excluded.has(tab.id))
     .filter((tab) => referenceUrls.some((refUrl) => matchesSourceUrlFamily(source, tab.url, refUrl)))
@@ -1292,7 +1425,10 @@ async function closeLocalhostCallbackTabs(callbackUrl, options = {}) {
 
   const { excludeTabIds = [] } = options;
   const excluded = new Set(excludeTabIds.filter(id => Number.isInteger(id)));
-  const tabs = await chrome.tabs.query({});
+  const state = await getState();
+  const tabs = filterTabsForCurrentRun(await chrome.tabs.query({}), state);
+  if (!tabs.length) return 0;
+
   const matchedIds = tabs
     .filter((tab) => Number.isInteger(tab.id) && !excluded.has(tab.id))
     .filter((tab) => isLocalhostOAuthCallbackTabMatch(callbackUrl, tab.url))
@@ -1330,7 +1466,10 @@ async function closeTabsByUrlPrefix(prefix, options = {}) {
 
   const { excludeTabIds = [] } = options;
   const excluded = new Set(excludeTabIds.filter(id => Number.isInteger(id)));
-  const tabs = await chrome.tabs.query({});
+  const state = await getState();
+  const tabs = filterTabsForCurrentRun(await chrome.tabs.query({}), state);
+  if (!tabs.length) return 0;
+
   const matchedIds = tabs
     .filter((tab) => Number.isInteger(tab.id) && !excluded.has(tab.id))
     .filter((tab) => typeof tab.url === 'string' && tab.url.startsWith(prefix))
@@ -1614,9 +1753,11 @@ function cancelPendingCommands(reason = STOP_ERROR_MESSAGE) {
 // ============================================================
 
 async function reuseOrCreateTab(source, url, options = {}) {
+  const shouldActivate = Boolean(options.activate);
   const alive = await isTabAlive(source);
   if (alive) {
     const tabId = await getTabId(source);
+    await ensureRunTabGroupForTab(tabId);
     await closeConflictingTabsForSource(source, url, { excludeTabIds: [tabId] });
     const currentTab = await chrome.tabs.get(tabId);
     const sameUrl = currentTab.url === url;
@@ -1624,7 +1765,9 @@ async function reuseOrCreateTab(source, url, options = {}) {
 
     const registry = await getTabRegistry();
     if (sameUrl) {
-      await chrome.tabs.update(tabId, { active: true });
+      if (shouldActivate) {
+        await chrome.tabs.update(tabId, { active: true });
+      }
       console.log(LOG_PREFIX, `Reused tab ${source} (${tabId}) on same URL`);
 
       if (shouldReloadOnReuse) {
@@ -1674,7 +1817,7 @@ async function reuseOrCreateTab(source, url, options = {}) {
     await setState({ tabRegistry: registry });
 
     // Navigate existing tab to new URL
-    await chrome.tabs.update(tabId, { url, active: true });
+    await chrome.tabs.update(tabId, shouldActivate ? { url, active: true } : { url });
     console.log(LOG_PREFIX, `Reused tab ${source} (${tabId}), navigated to ${url.slice(0, 60)}`);
 
     // Wait for page load complete (with 30s timeout)
@@ -1716,7 +1859,8 @@ async function reuseOrCreateTab(source, url, options = {}) {
 
   // Create new tab
   await closeConflictingTabsForSource(source, url);
-  const tab = await chrome.tabs.create({ url, active: true });
+  const tab = await chrome.tabs.create({ url, active: shouldActivate });
+  await ensureRunTabGroupForTab(tab.id);
   console.log(LOG_PREFIX, `Created new tab ${source} (${tab.id})`);
 
   // If dynamic injection needed (VPS panel), inject scripts after load
@@ -2590,6 +2734,15 @@ async function handleMessage(message, sender) {
     case 'CONTENT_SCRIPT_READY': {
       const tabId = sender.tab?.id;
       if (tabId && message.source) {
+        const state = await getState();
+        if (!isSenderTabInCurrentRunGroup(sender, state)) {
+          console.log(
+            LOG_PREFIX,
+            `Ignoring CONTENT_SCRIPT_READY from ${message.source} outside current run group`,
+            { tabId, groupId: sender.tab?.groupId ?? null }
+          );
+          return { ok: true, ignored: true };
+        }
         await registerTab(message.source, tabId);
         flushCommand(message.source, tabId);
         await addLog(`内容脚本已就绪：${getSourceLabel(message.source)}（标签页 ${tabId}）`);
@@ -2637,6 +2790,12 @@ async function handleMessage(message, sender) {
       clearStopRequest();
       await clearScheduledAutoRunAlarm();
       await resetState();
+      await setState({
+        tabRegistry: {},
+        sourceLastUrls: {},
+        runTabGroupId: null,
+        runTabGroupWindowId: null,
+      });
       await addLog('流程已重置', 'info');
       return { ok: true };
     }
@@ -3435,7 +3594,7 @@ async function runAutoSequenceFromStep(startStep, context = {}) {
 
   const signupTabId = await getTabId('signup-page');
   if (signupTabId) {
-    await chrome.tabs.update(signupTabId, { active: true });
+    await ensureRunTabGroupForTab(signupTabId);
   }
 
   let step = Math.max(startStep, 4);
@@ -3555,6 +3714,8 @@ async function legacyAutoRunLoop(totalRuns, options = {}) {
         cloudflareDomain: prevState.cloudflareDomain,
         cloudflareDomains: prevState.cloudflareDomains,
         // Fresh attempts must drop stale tab/url runtime state from the prior run.
+        runTabGroupId: null,
+        runTabGroupWindowId: null,
         tabRegistry: {},
         sourceLastUrls: {},
         ...getAutoRunStatusPayload('running', { currentRun: targetRun, totalRuns, attemptRun: attemptRuns }),
@@ -4076,6 +4237,8 @@ async function autoRunLoop(totalRuns, options = {}) {
           cloudflareDomain: prevState.cloudflareDomain,
           cloudflareDomains: prevState.cloudflareDomains,
           autoRunRoundSummaries: serializeAutoRunRoundSummaries(totalRuns, roundSummaries),
+          runTabGroupId: null,
+          runTabGroupWindowId: null,
           tabRegistry: {},
           sourceLastUrls: {},
           ...getAutoRunStatusPayload('running', { currentRun: targetRun, totalRuns, attemptRun }),
@@ -4338,8 +4501,9 @@ async function executeCpaStep1(state) {
 
   await closeConflictingTabsForSource('vps-panel', state.vpsUrl);
 
-  const tab = await chrome.tabs.create({ url: state.vpsUrl, active: true });
+  const tab = await chrome.tabs.create({ url: state.vpsUrl, active: false });
   const tabId = tab.id;
+  await ensureRunTabGroupForTab(tabId);
   await rememberSourceLastUrl('vps-panel', state.vpsUrl);
 
   await addLog('步骤 1：CPA 面板已打开，正在等待页面进入目标地址...');
@@ -4394,8 +4558,9 @@ async function executeSub2ApiStep1(state) {
 
   await closeConflictingTabsForSource('sub2api-panel', sub2apiUrl);
 
-  const tab = await chrome.tabs.create({ url: sub2apiUrl, active: true });
+  const tab = await chrome.tabs.create({ url: sub2apiUrl, active: false });
   const tabId = tab.id;
+  await ensureRunTabGroupForTab(tabId);
   await rememberSourceLastUrl('sub2api-panel', sub2apiUrl);
 
   await addLog('步骤 1：SUB2API 页面已打开，正在等待页面进入目标地址...');
@@ -4623,7 +4788,6 @@ async function requestVerificationCodeResend(step) {
   }
 
   throwIfStopped();
-  await chrome.tabs.update(signupTabId, { active: true });
   throwIfStopped();
   await addLog(`步骤 ${step}：正在请求新的${getVerificationCodeLabel(step)}验证码...`, 'warn');
   throwIfStopped();
@@ -4650,8 +4814,7 @@ async function requestVerificationCodeResend(step) {
   if (currentState.mailProvider === '2925') {
     const mailTabId = await getTabId('mail-2925');
     if (mailTabId) {
-      await chrome.tabs.update(mailTabId, { active: true });
-      await addLog(`步骤 ${step}：已切换到 2925 邮箱标签页等待新邮件。`, 'info');
+      await addLog(`步骤 ${step}：已保留 2925 邮箱标签页等待新邮件。`, 'info');
     }
   }
 
@@ -4776,7 +4939,6 @@ async function submitVerificationCode(step, code) {
     throw new Error('认证页面标签页已关闭，无法填写验证码。');
   }
 
-  await chrome.tabs.update(signupTabId, { active: true });
   const result = await sendToContentScript('signup-page', {
     type: 'FILL_CODE',
     step,
@@ -4869,7 +5031,6 @@ async function executeStep4(state) {
     throw new Error('认证页面标签页已关闭，无法继续步骤 4。');
   }
 
-  await chrome.tabs.update(signupTabId, { active: true });
   throwIfStopped();
   await addLog('步骤 4：正在确认注册验证码页面是否就绪，必要时自动恢复密码页超时报错...');
   const prepareResult = await sendToContentScriptResilient(
@@ -4919,7 +5080,7 @@ async function executeStep4(state) {
         });
       } else {
         const tabId = await getTabId(mail.source);
-        await chrome.tabs.update(tabId, { active: true });
+        await ensureRunTabGroupForTab(tabId);
       }
     } else {
       await reuseOrCreateTab(mail.source, mail.url, {
@@ -5007,7 +5168,7 @@ async function runStep7Attempt(state) {
   const authTabId = await getTabId('signup-page');
 
   if (authTabId) {
-    await chrome.tabs.update(authTabId, { active: true });
+    await ensureRunTabGroupForTab(authTabId);
   } else {
     if (!state.oauthUrl) {
       throw new Error('缺少 OAuth 链接，请先完成步骤 1。');
@@ -5053,7 +5214,7 @@ async function runStep7Attempt(state) {
         });
       } else {
         const tabId = await getTabId(mail.source);
-        await chrome.tabs.update(tabId, { active: true });
+        await ensureRunTabGroupForTab(tabId);
       }
     } else {
       await reuseOrCreateTab(mail.source, mail.url, {
@@ -5282,8 +5443,6 @@ async function reloadStep8ConsentPage(tabId, timeoutMs = 30000) {
     throw new Error('步骤 8：缺少有效的认证页标签页，无法刷新后重试。');
   }
 
-  await chrome.tabs.update(tabId, { active: true }).catch(() => { });
-
   await new Promise((resolve, reject) => {
     let settled = false;
     const timer = setTimeout(() => {
@@ -5442,11 +5601,11 @@ async function executeStep8(state) {
         throwIfStep8SettledOrStopped(resolved);
 
         if (signupTabId && await isTabAlive('signup-page')) {
-          await chrome.tabs.update(signupTabId, { active: true });
-          await addLog('步骤 8：已切回认证页，正在准备调试器点击...');
+          await ensureRunTabGroupForTab(signupTabId);
+          await addLog('步骤 8：已定位到认证页，正在准备自动授权...');
         } else {
           signupTabId = await reuseOrCreateTab('signup-page', state.oauthUrl);
-          await addLog('步骤 8：已重新打开认证页，正在准备调试器点击...');
+          await addLog('步骤 8：已重新打开认证页，正在准备自动授权...');
         }
 
         throwIfStep8SettledOrStopped(resolved);
@@ -5550,8 +5709,8 @@ async function executeCpaStep9(state) {
       reloadIfSameUrl: true,
     });
   } else {
+    await ensureRunTabGroupForTab(tabId);
     await closeConflictingTabsForSource('vps-panel', state.vpsUrl, { excludeTabIds: [tabId] });
-    await chrome.tabs.update(tabId, { active: true });
     await rememberSourceLastUrl('vps-panel', state.vpsUrl);
   }
 
@@ -5559,7 +5718,7 @@ async function executeCpaStep9(state) {
     inject: injectFiles,
     timeoutMs: 45000,
     retryDelayMs: 900,
-    logMessage: '姝ラ 9锛欳PA 闈㈡澘浠嶅湪鍔犺浇锛屾鍦ㄩ噸璇曡繛鎺ュ唴瀹硅剼鏈?..',
+    logMessage: '步骤 9：CPA 面板仍在加载，正在重试连接内容脚本...',
   });
 
   await addLog('步骤 9：正在填写回调地址...');
@@ -5617,8 +5776,8 @@ async function executeSub2ApiStep9(state) {
       reloadIfSameUrl: true,
     });
   } else {
+    await ensureRunTabGroupForTab(tabId);
     await closeConflictingTabsForSource('sub2api-panel', sub2apiUrl, { excludeTabIds: [tabId] });
-    await chrome.tabs.update(tabId, { active: true });
     await rememberSourceLastUrl('sub2api-panel', sub2apiUrl);
   }
 

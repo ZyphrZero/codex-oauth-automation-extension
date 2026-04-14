@@ -54,6 +54,7 @@ const bundle = [
   extractFunction('clearStopRequest'),
   extractFunction('throwIfStopped'),
   extractFunction('isStopError'),
+  extractFunction('getErrorMessage'),
   extractFunction('isStepDoneStatus'),
   extractFunction('isRestartCurrentAttemptError'),
   extractFunction('getFirstUnfinishedStep'),
@@ -65,6 +66,8 @@ const bundle = [
 
 const api = new Function(`
 const STOP_ERROR_MESSAGE = 'Flow stopped.';
+const AUTO_RUN_MAX_RETRIES_PER_ROUND = 3;
+const AUTO_RUN_RETRY_DELAY_MS = 1000;
 const DEFAULT_STATE = {
   stepStatuses: {
     1: 'pending',
@@ -106,6 +109,8 @@ let currentState = {
   inbucketMailbox: '',
   cloudflareDomain: '',
   cloudflareDomains: [],
+  runTabGroupId: 11,
+  runTabGroupWindowId: 7,
   tabRegistry: {},
   sourceLastUrls: {},
 };
@@ -155,6 +160,8 @@ async function resetState() {
     inbucketMailbox: prev.inbucketMailbox,
     cloudflareDomain: prev.cloudflareDomain,
     cloudflareDomains: [...(prev.cloudflareDomains || [])],
+    runTabGroupId: prev.runTabGroupId,
+    runTabGroupWindowId: prev.runTabGroupWindowId,
     tabRegistry: { ...(prev.tabRegistry || {}) },
     sourceLastUrls: { ...(prev.sourceLastUrls || {}) },
   };
@@ -211,7 +218,12 @@ async function runAutoSequenceFromStep() {
 
   if (
     runCalls === 2
-    && (Object.keys(state.tabRegistry || {}).length || Object.keys(state.sourceLastUrls || {}).length)
+    && (
+      Object.keys(state.tabRegistry || {}).length
+      || Object.keys(state.sourceLastUrls || {}).length
+      || state.runTabGroupId !== null
+      || state.runTabGroupWindowId !== null
+    )
   ) {
     throw new Error('fresh auto-run attempt reused stale runtime tab context');
   }
@@ -235,6 +247,8 @@ async function runAutoSequenceFromStep() {
     sourceLastUrls: {
       'signup-page': 'https://auth.openai.com/authorize',
     },
+    runTabGroupId: 22,
+    runTabGroupWindowId: 7,
   };
 }
 

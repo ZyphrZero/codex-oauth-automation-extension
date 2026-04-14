@@ -51,6 +51,10 @@ function extractFunction(name) {
 }
 
 const bundle = [
+  extractFunction('normalizeRunTabGroupId'),
+  extractFunction('getRunTabGroupId'),
+  extractFunction('doesTabBelongToRunGroup'),
+  extractFunction('filterTabsForCurrentRun'),
   extractFunction('getTabRegistry'),
   extractFunction('parseUrlSafely'),
   extractFunction('isLocalhostOAuthCallbackUrl'),
@@ -63,6 +67,7 @@ const bundle = [
 
 const api = new Function(`
 let currentState = {
+  runTabGroupId: 11,
   tabRegistry: {
     'signup-page': { tabId: 1, ready: true },
     'vps-panel': { tabId: 99, ready: true },
@@ -117,6 +122,7 @@ return {
     removedBatches.length = 0;
     logMessages.length = 0;
     currentState = {
+      runTabGroupId: 11,
       tabRegistry: tabRegistry || {},
     };
   },
@@ -152,10 +158,11 @@ return {
 
   api.reset({
     tabs: [
-      { id: 1, url: codexCallbackUrl },
-      { id: 2, url: 'http://127.0.0.1:8317/codex/dashboard' },
-      { id: 3, url: 'http://127.0.0.1:8317/codex/callback?code=other&state=xyz' },
-      { id: 4, url: authCallbackUrl },
+      { id: 1, url: codexCallbackUrl, groupId: 11 },
+      { id: 2, url: 'http://127.0.0.1:8317/codex/dashboard', groupId: 11 },
+      { id: 3, url: 'http://127.0.0.1:8317/codex/callback?code=other&state=xyz', groupId: 11 },
+      { id: 4, url: authCallbackUrl, groupId: 11 },
+      { id: 5, url: 'http://127.0.0.1:8317/codex/dashboard', groupId: 22 },
     ],
     tabRegistry: {
       'signup-page': { tabId: 1, ready: true },
@@ -183,9 +190,10 @@ return {
 
   api.reset({
     tabs: [
-      { id: 1, url: codexCallbackUrl },
-      { id: 4, url: authCallbackUrl },
-      { id: 5, url: 'http://localhost:1455/auth/dashboard' },
+      { id: 1, url: codexCallbackUrl, groupId: 22 },
+      { id: 4, url: authCallbackUrl, groupId: 11 },
+      { id: 5, url: 'http://localhost:1455/auth/dashboard', groupId: 11 },
+      { id: 6, url: authCallbackUrl, groupId: 22 },
     ],
     tabRegistry: {},
   });

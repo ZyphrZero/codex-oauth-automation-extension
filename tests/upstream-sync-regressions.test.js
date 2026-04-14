@@ -162,15 +162,12 @@ async function testRequestVerificationCodeResendSwitchesBackTo2925Tab() {
   assert.strictEqual(state.sentMessages.length, 1, '应向注册页发送一次重发验证码请求');
   assert.deepStrictEqual(
     state.tabUpdates,
-    [
-      { tabId: 11, updateInfo: { active: true } },
-      { tabId: 22, updateInfo: { active: true } },
-    ],
-    '2925 模式下重发后应切回邮箱标签页'
+    [],
+    '重发验证码不应强制切换到认证页或邮箱页'
   );
   assert.ok(
-    state.logs.some((entry) => entry.message.includes('已切换到 2925 邮箱标签页等待新邮件')),
-    '2925 模式下应记录切回邮箱标签页的日志'
+    state.logs.some((entry) => entry.message.includes('已保留 2925 邮箱标签页等待新邮件')),
+    '2925 模式下应记录保留邮箱标签页的日志'
   );
 }
 
@@ -181,11 +178,11 @@ async function testRequestVerificationCodeResendKeepsOtherMailProvidersUntouched
   const state = api.snapshot();
   assert.deepStrictEqual(
     state.tabUpdates,
-    [{ tabId: 11, updateInfo: { active: true } }],
-    '非 2925 模式下不应额外切换邮箱标签页'
+    [],
+    '非 2925 模式下重发验证码也不应强制切换标签页'
   );
   assert.ok(
-    !state.logs.some((entry) => entry.message.includes('已切换到 2925 邮箱标签页等待新邮件')),
+    !state.logs.some((entry) => entry.message.includes('已保留 2925 邮箱标签页等待新邮件')),
     '非 2925 模式下不应写入 2925 切页日志'
   );
 }
